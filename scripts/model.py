@@ -423,7 +423,7 @@ class KLCriterion(nn.Module):
 
     def forward(self, out, Y, F):
         P = Y.mul(out)
-        P = P.sum(-1).sum(-1) # compute LOG probabilities
+        P = P.sum(-1).sum(-1).exp().log_softmax(dim=-1) # compute LOG probabilities
         return self.crit(P, F)
 
 class SimpleLossCompute():
