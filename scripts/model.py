@@ -106,9 +106,8 @@ def decode_output(output_tensor):
 def tensorfy_target(row):
     ohe_target = one_hot(row['outcome'])
     ohe_train  = one_hot_kmer(row['outcome'])
-    n   = row[['count_r1', 'count_r2']].sum()
-    d   = row[['total_r1', 'total_r2']].sum()
-    return [ohe_target, ohe_train, n / d]
+    f = row['frequency']
+    return [ohe_target, ohe_train, f]
 
 def tensorfy_targets(targets, max_targets):
     dna_len = len(targets.iloc[0]['outcome'])
@@ -133,7 +132,7 @@ def create_batches(df, batch_size=16, device=None):
 
         batch = samples.groupby('sgrna_id').apply(
             lambda df: (
-                one_hot_kmer(df['native_outcome'].iloc[0]),
+                one_hot_kmer(df.iloc[0]['native_outcome']),
                 tensorfy_targets(df, max_targets)
             )
         )
@@ -144,10 +143,16 @@ def create_batches(df, batch_size=16, device=None):
         frequencies = torch.stack(list(batch.apply(lambda x: x[1][2])))
 
         if device is not None:
-            for tens in [inputs, Y_test, Y_train, frequencies]:
-                tens.to(device=device)
+            inputs      = inputs.to(device=device)
+            Y_test      = Y_test.to(device=device)
+            Y_train     = Y_train.to(device=device)
+            frequencies = frequencies.to(device=device)
 
         return inputs, Y_test, Y_train, frequencies
+
+    df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
+    df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
+    df['frequency'] = df['count'] / df['total']
 
     sgrnas = df['sgrna_id'].sample(df['sgrna_id'].size).unique()
     for batch in partition(16, sgrnas):
@@ -414,7 +419,7 @@ HYPER_PARAMETERS = {
 class KLCriterion(nn.Module):
     def __init__(self):
         super(KLCriterion, self).__init__()
-        self.crit = nn.KLDivLoss()
+        self.crit = nn.KLDivLoss(reduction='batchmean')
 
     def forward(self, out, Y, F):
         P = Y.mul(out)
@@ -464,16 +469,15 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=DeprecationWarning) 
     warnings.filterwarnings("ignore", category=UserWarning) 
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
-    print(device)
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     training_df = pd.read_csv(sys.argv[1])
     test_df = pd.read_csv(sys.argv[2])
 
     print('Loading batches.')
 
-    training_iter = list(tqdm(create_batches(training_df, device=device)))
-    test_iter = list(tqdm(create_batches(test_df, device=device)))
+    training_iter = create_batches(training_df, device=device)
+    test_iter = create_batches(test_df, device=device)
 
     print('Finished loading batches.')
 
@@ -491,7 +495,7 @@ if __name__ == "__main__":
         print(f'=========EPOCH {epoch}=========')
         model.train()
         training_loss = run_epoch(training_iter, model, loss_compute)
-        print(f'Training loss: {loss}')
+        print(f'Training loss: {training_loss}')
 
         model.eval()
         test_loss = run_epoch(test_iter, model, loss_compute)

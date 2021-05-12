@@ -134,3 +134,39 @@ res = m(X_e, Y_e, c(mask), c(mask))
 res.shape
 
 assert torch.all(res[0][1] == res[0][0]).item()
+
+''' Testing Loss Function '''
+
+out = torch.tensor(
+    [[[[1/2, 1/2, 0,  0],
+      [1,   0, 0,    0],
+      [0,   0, 9/10, 1/10],
+      [0,   1, 0,    0]],
+
+     [[1/4, 0,   0,      3/4],
+      [0,   .99, .01,    0],
+      [0,   0,   9/10,   1/10],
+      [0,   1,   0,      0]]]]
+)
+
+target = torch.tensor(
+    [[[[1, 0, 0, 0],
+      [1, 0, 0, 0],
+      [0, 0, 1, 0],
+      [0, 1, 0, 0]],
+
+     [[0, 0, 0, 1],
+      [0, 1, 0, 0],
+      [0, 0, 1, 0],
+      [0, 1, 0, 0]]]]
+)
+    
+
+(out + 1e-12).log().mul(target).sum(-1).sum(-1).exp()
+
+# need to use batchmean instead of mean (default)
+nn.KLDivLoss(reduction='batchmean')(
+    torch.tensor([[1/2, 1/2],
+                  [2/3, 1/3]]).log(),
+    torch.tensor([[1/4, 3/4],
+                  [2/3, 1/3]]))
