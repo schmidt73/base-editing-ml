@@ -1,3 +1,4 @@
+import json
 import time
 import math
 import sys
@@ -125,7 +126,7 @@ def tensorfy_targets(targets, max_targets):
 
     return embedding_tensor_target, embedding_tensor_train, frequency_tensor
 
-def create_batches(df, batch_size=16, device=None):
+def create_batches(df, device, batch_size=16):
     def create_batch(sgrna_ids):
         samples = df[df['sgrna_id'].isin(set(sgrna_ids))]
         max_targets = samples.groupby('sgrna_id').count().sgrna.max()
@@ -137,16 +138,10 @@ def create_batches(df, batch_size=16, device=None):
             )
         )
 
-        inputs = torch.stack(list(batch.apply(first)))
-        Y_test = torch.stack(list(batch.apply(lambda x: x[1][0])))
-        Y_train = torch.stack(list(batch.apply(lambda x: x[1][1])))
-        frequencies = torch.stack(list(batch.apply(lambda x: x[1][2])))
-
-        if device is not None:
-            inputs      = inputs.to(device=device)
-            Y_test      = Y_test.to(device=device)
-            Y_train     = Y_train.to(device=device)
-            frequencies = frequencies.to(device=device)
+        inputs = torch.stack(list(batch.apply(first))).to(device)
+        Y_test = torch.stack(list(batch.apply(lambda x: x[1][0]))).to(device)
+        Y_train = torch.stack(list(batch.apply(lambda x: x[1][1]))).to(device)
+        frequencies = torch.stack(list(batch.apply(lambda x: x[1][2]))).to(device)
 
         return inputs, Y_test, Y_train, frequencies
 
@@ -443,14 +438,14 @@ class SimpleLossCompute():
             self.opt.zero_grad()
         return loss.item()
 
-def run_epoch(batch_iter, model, loss_compute):
+def run_epoch(batch_iter, model, loss_compute, device):
     "Standard Training and Logging Function"
     start = time.time()
     total_tokens = 0
     total_loss = 0
     tokens = 0
     for i, (X, Y_train, Y_test, F) in enumerate(batch_iter):
-        mask = subsequent_mask(X.size(-2)) 
+        mask = subsequent_mask(X.size(-2)).to(device)
         ntokens = X.size(0)
         out = model.forward(X, Y_test, mask, mask)
         loss = loss_compute(out, Y_train, F)
@@ -470,16 +465,10 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=UserWarning) 
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print(f'Device is: {device}')
 
     training_df = pd.read_csv(sys.argv[1])
     test_df = pd.read_csv(sys.argv[2])
-
-    print('Loading batches.')
-
-    training_iter = create_batches(training_df, device=device)
-    test_iter = create_batches(test_df, device=device)
-
-    print('Finished loading batches.')
 
     model = make_model(**HYPER_PARAMETERS)
 
@@ -487,16 +476,36 @@ if __name__ == "__main__":
     optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     loss_compute = SimpleLossCompute(model.generator, criterion, optimizer)
 
-    if device is not None:
-        model.to(device)
-        criterion.to(device)
+    model.to(device)
+    criterion.to(device)
 
+    losses = []
     for epoch in range(100):
+        training_iter = create_batches(training_df, device)
+        test_iter = create_batches(test_df, device)
+
         print(f'=========EPOCH {epoch}=========')
         model.train()
-        training_loss = run_epoch(training_iter, model, loss_compute)
+        training_loss = run_epoch(training_iter, model, loss_compute, device)
         print(f'Training loss: {training_loss}')
 
         model.eval()
-        test_loss = run_epoch(test_iter, model, loss_compute)
+        test_loss = run_epoch(test_iter, model, loss_compute, device)
         print(f'Test loss: {test_loss}')
+
+        losses.append({
+            'epoch': epoch,
+            'test_loss': test_loss,
+            'training_loss': training_loss
+        })
+
+        with open('model_loss.json', 'w') as f:
+            f.write(json.dumps(losses))
+
+        state = {
+            'epoch': epoch,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+        }
+
+        torch.save(state, "model_state.torch") 
