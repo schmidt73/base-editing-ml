@@ -1,12 +1,20 @@
+import time
 import math
+import sys
+import copy
 import random
+import warnings
+
 import pandas as pd
 import numpy as np
+
 import torch
+import torch.cuda
 import torch.nn as nn
 import torch.nn.functional as F
-import copy
+import torch.optim as optim
 
+from tqdm import tqdm
 from funcy import partition
 from torch.autograd import Variable
 
@@ -17,6 +25,7 @@ from torch.autograd import Variable
 ''' Useful Helper Functions '''
 first  = lambda x: x[0]
 second = lambda x: x[1]
+third  = lambda x: x[2]
 
 def random_dna_sequence(k=20):
     return ''.join(random.choices(list("ATCG"), k=k))
@@ -69,9 +78,20 @@ def kmer_encoding(k=3):
     return encoding
 
 # B represents overflow on the boundary
-ONE_HOT_MAP = kmer_encoding()
+ONE_HOT_MAP_KMER = kmer_encoding()
+def one_hot_kmer(seq):
+    enc = list(map(lambda k: ONE_HOT_MAP_KMER[k], get_kmers(seq)))
+    return torch.stack(enc)
+
+ONE_HOT_MAP = {
+    'A': torch.tensor([1, 0, 0, 0]),
+    'T': torch.tensor([0, 1, 0, 0]),
+    'C': torch.tensor([0, 0, 1, 0]),
+    'G': torch.tensor([0, 0, 0, 1])
+}
+
 def one_hot(seq):
-    enc = list(map(lambda k: ONE_HOT_MAP[k], get_kmers(seq)))
+    enc = list(map(lambda k: ONE_HOT_MAP[k], get_kmers(seq, k=1)))
     return torch.stack(enc)
 
 DECODE_MAP  = {v.argmax().item(): k for k, v in ONE_HOT_MAP.items()}
@@ -84,10 +104,11 @@ def decode_output(output_tensor):
 ###################
 
 def tensorfy_target(row):
-    ohe = one_hot(row['outcome'])
+    ohe_target = one_hot(row['outcome'])
+    ohe_train  = one_hot_kmer(row['outcome'])
     n   = row[['count_r1', 'count_r2']].sum()
     d   = row[['total_r1', 'total_r2']].sum()
-    return [ohe, n / d]
+    return [ohe_target, ohe_train, n / d]
 
 def tensorfy_targets(targets, max_targets):
     dna_len = len(targets.iloc[0]['outcome'])
@@ -96,30 +117,37 @@ def tensorfy_targets(targets, max_targets):
     # Ensure that we have the same number of targets across batch
     # by padding with random targets
     for i in range(max_targets - len(targets)):
-        tensors.append([one_hot(random_dna_sequence(k=dna_len)), 0])
+        dna = random_dna_sequence(k=dna_len)
+        tensors.append([one_hot(dna), one_hot_kmer(dna), 0])
 
-    embedding_tensor = torch.stack(list(map(first, tensors)))
-    frequency_tensor = torch.tensor(list(map(second, tensors)))
+    embedding_tensor_target = torch.stack(list(map(first, tensors)))
+    embedding_tensor_train = torch.stack(list(map(second, tensors)))
+    frequency_tensor = torch.tensor(list(map(third, tensors)))
 
-    return embedding_tensor, frequency_tensor
+    return embedding_tensor_target, embedding_tensor_train, frequency_tensor
 
-def create_batches(df, batch_size=16):
+def create_batches(df, batch_size=16, device=None):
     def create_batch(sgrna_ids):
         samples = df[df['sgrna_id'].isin(set(sgrna_ids))]
         max_targets = samples.groupby('sgrna_id').count().sgrna.max()
 
         batch = samples.groupby('sgrna_id').apply(
             lambda df: (
-                one_hot(df['native_outcome'].iloc[0]),
+                one_hot_kmer(df['native_outcome'].iloc[0]),
                 tensorfy_targets(df, max_targets)
             )
         )
 
         inputs = torch.stack(list(batch.apply(first)))
-        targets = torch.stack(list(batch.apply(lambda x: x[1][0])))
-        frequencies = torch.stack(list(batch.apply(lambda x: x[1][1])))
+        Y_test = torch.stack(list(batch.apply(lambda x: x[1][0])))
+        Y_train = torch.stack(list(batch.apply(lambda x: x[1][1])))
+        frequencies = torch.stack(list(batch.apply(lambda x: x[1][2])))
 
-        return inputs, targets, frequencies
+        if device is not None:
+            for tens in [inputs, Y_test, Y_train, frequencies]:
+                tens.to(device=device)
+
+        return inputs, Y_test, Y_train, frequencies
 
     sgrnas = df['sgrna_id'].sample(df['sgrna_id'].size).unique()
     for batch in partition(16, sgrnas):
@@ -128,15 +156,6 @@ def create_batches(df, batch_size=16):
 ###########
 ## MODEL ##
 ###########
-
-HYPER_PARAMETERS = {
-    'dropout': 0.1,
-    'num_encoder_layers': 2,
-    'num_decoder_layers': 2,
-    'nhead': 1,
-    'dim_feedforward': 512,
-    'activation': 'relu',
-}
 
 class EncoderDecoder(nn.Module):
     """
@@ -154,7 +173,7 @@ class EncoderDecoder(nn.Module):
     def forward(self, src, tgt, src_mask, tgt_mask):
         "Take in and process masked src and target sequences."
         return self.decode(self.encode(src, src_mask), src_mask,
-                            tgt, tgt_mask)
+                           tgt, tgt_mask)
     
     def encode(self, src, src_mask):
         return self.encoder(self.src_embed(src), src_mask)
@@ -357,7 +376,7 @@ class PositionalEncoding(nn.Module):
                          requires_grad=False)
         return self.dropout(x)
 
-def make_model(tgt_vocab, N=6,
+def make_model(tgt_vocab=4, N=6,
                d_model=512, d_ff=2048, h=8, dropout=0.1):
     "Helper: Construct a model from hyperparameters."
     c = copy.deepcopy
@@ -383,12 +402,97 @@ def make_model(tgt_vocab, N=6,
 ##    Training     ##
 #####################
 
-df = pd.read_csv('../data/be-hive/processed/mES_12kChar_BE4_H47ES48A.csv')
-res = next(create_batches(df))
+HYPER_PARAMETERS = {
+    'tgt_vocab': 4,
+    'dropout': 0.1,
+    'N': 2,
+    'h': 1,
+    'd_ff': 512,
+    'd_model': 128,
+}
 
-print(res[0].shape)
-print(res[1].shape)
-print(res[2].shape)
+class KLCriterion(nn.Module):
+    def __init__(self):
+        super(KLCriterion, self).__init__()
+        self.crit = nn.KLDivLoss()
+
+    def forward(self, out, Y, F):
+        P = Y.mul(out)
+        P = P.sum(-1).sum(-1) # compute LOG probabilities
+        return self.crit(P, F)
+
+class SimpleLossCompute():
+    "A simple loss compute and train function."
+    def __init__(self, generator, criterion, opt=None):
+        self.generator = generator
+        self.criterion = criterion
+        self.opt = opt
+        
+    def __call__(self, out, Y, F):
+        out = self.generator(out)
+        loss = self.criterion(out, Y, F)
+
+        loss.backward()
+        if self.opt is not None:
+            self.opt.step()
+            self.opt.zero_grad()
+        return loss.item()
+
+def run_epoch(batch_iter, model, loss_compute):
+    "Standard Training and Logging Function"
+    start = time.time()
+    total_tokens = 0
+    total_loss = 0
+    tokens = 0
+    for i, (X, Y_train, Y_test, F) in enumerate(batch_iter):
+        mask = subsequent_mask(X.size(-2)) 
+        ntokens = X.size(0)
+        out = model.forward(X, Y_test, mask, mask)
+        loss = loss_compute(out, Y_train, F)
+        total_loss += loss
+        total_tokens += ntokens
+        tokens += ntokens
+        if i % 10 == 1:
+            elapsed = time.time() - start
+            print("Epoch Step: %d Loss: %f Tokens per Sec: %f" %
+                    (i, loss / ntokens, tokens / elapsed))
+            start = time.time()
+            tokens = 0
+    return total_loss / total_tokens
 
 if __name__ == "__main__":
-    pass
+    warnings.filterwarnings("ignore", category=DeprecationWarning) 
+    warnings.filterwarnings("ignore", category=UserWarning) 
+
+    device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
+    print(device)
+
+    training_df = pd.read_csv(sys.argv[1])
+    test_df = pd.read_csv(sys.argv[2])
+
+    print('Loading batches.')
+
+    training_iter = list(tqdm(create_batches(training_df, device=device)))
+    test_iter = list(tqdm(create_batches(test_df, device=device)))
+
+    print('Finished loading batches.')
+
+    model = make_model(**HYPER_PARAMETERS)
+
+    criterion = KLCriterion()
+    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    loss_compute = SimpleLossCompute(model.generator, criterion, optimizer)
+
+    if device is not None:
+        model.to(device)
+        criterion.to(device)
+
+    for epoch in range(100):
+        print(f'=========EPOCH {epoch}=========')
+        model.train()
+        training_loss = run_epoch(training_iter, model, loss_compute)
+        print(f'Training loss: {loss}')
+
+        model.eval()
+        test_loss = run_epoch(test_iter, model, loss_compute)
+        print(f'Test loss: {test_loss}')

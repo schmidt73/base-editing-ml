@@ -102,8 +102,8 @@ splat(X, Y.size(0) // X.size(0))
 X = ["CACGACTGAAAATCTTATTC",
      "ACAGTCGGTCATATTGGGGT"]
 
-Y = [["CACGACTGAAAATCTTATTC", "CACGACTGAAAATCTTATTC"],
-     ["ACAGTTGGTCATATTGGGGT", "ACAGTCGGTCATATTGGGGT"]]
+Y = [["CACGACTGAAAATCTTATTC", "CACGACTGAAAATCTTATTC",  "CACGACTGTAAATCTTATTC"],
+     ["ACAGTTGGTCATATTGGGGT", "ACAGTCGGTCATATTGGGGT",  "ACAGTTTTTCATATTGGGGT"]]
 
 def embed_input(X):
     return torch.stack([model.one_hot(x) for x in X])
@@ -130,5 +130,7 @@ Y_e.shape
 mask = model.subsequent_mask(20)
 c = copy.deepcopy
 res = m(X_e, Y_e, c(mask), c(mask))
+
+res.shape
 
 assert torch.all(res[0][1] == res[0][0]).item()
