@@ -1,0 +1,119 @@
+\documentclass[12pt]{article}
+
+\usepackage{geometry}
+\usepackage{parskip}
+\usepackage{xparse}
+\usepackage{xspace}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{amsfonts,amsmath,amsthm,amssymb}
+\usepackage{mathtools}
+
+\geometry{margin=1in}
+
+%%%
+% KL-divergence
+%
+%   \kld{p}{q}
+%%%
+
+\DeclarePairedDelimiterX{\infdivx}[2]{(}{)}{%
+  #1\;\delimsize|\delimsize|\;#2%
+}
+\newcommand{\kld}[2]{\ensuremath{D_{KL}\infdivx{#1}{#2}}\xspace}
+
+\begin{document}
+
+\section*{Background}
+Sequence-to-sequence models aim to learn the mapping between a set of
+source and target strings, $\{(x_i, y_i)\}$. Specifically, models such
+as the Transformer learn a conditional probability distribution
+$P_\theta$ that maximizes the conditional probability of the target
+$y_i$, given the value $x_i$:
+
+$$\max_{\theta} \prod_{i=1}^n{P_\theta[y_i | x_i]} = \max_{\theta}\sum_{i=1}^n{\log{P_\theta[y_i | x_i]}}$$
+
+In the Transformer, this distribution is constructed in an
+autoregressive fashion. That is, for a given training pair $(x, y)$
+the output is matrix $Y : S \times |\Sigma|$ where $S \in \mathbb{N}$
+is the output sequence length. And each entry $(k, \sigma)$ is defined
+as,
+
+$$Y_{k,\sigma} = P_\theta[\sigma | y_1\ldots y_{k-1}]$$
+
+Note that because this matrix $Y$ is row-stochastic, we can use the
+KL-divergence between the rows of this matrix and the target one-hot
+encoding as our loss. For clarity, the target matrix
+$T : S \times |\Sigma|$ is defined as
+
+$$T_{k, \sigma} =
+  \begin{cases}
+    1 \text{ if } \sigma = y_k\\
+    0 \text{ otherwise}
+  \end{cases}
+$$
+
+In implementation, this target matrix may be smoothed to avoid
+overconfident predictions. Many details of the implementation have
+been glossed over for clarity.
+
+\section*{Base Editing Problem}
+Unfortunately, the base-editing prediction problem does not directly
+map onto the aforementioned sequence-to-sequence paradigm. Instead of
+a single target, we observe mappings between source strings and
+probability distributions. Specifically, we have a set of samples of
+the form $\{(x_i,P_{y_i})\}$ where $P_{y_i}$ denotes a discrete
+distribution over strings. Thus we aim to learn a mapping $\phi$ from
+$x$ that parameterizes the distribution such that
+$P_{\phi(x_i)} \approx P_{y_i}$.
+
+A natural loss function for this model is to maximize the similarity,
+or minimize the difference, between the target and predicted
+distributions. That is we find $\phi$ that minimizes,
+
+$$\min_{\phi}\sum_{i=1}^n\kld{P_{y_i}}{P_{\phi(x_i)}}$$
+
+There are several difficulties placing this objective in the context
+of the sequence-to-sequence model.
+
+First, each row $k$ of the matrix $Y$ conditions on previous
+symbols. During training time, we feed these symbols in iteratively by
+masking the attention matrix to not allow look-ahead. The issue with
+this conditioning is that it does not allow us to compute the
+probability of an abitrary sequence without re-evaluating the model on
+the new sequence. For example, suppose we want to compute
+$P_\theta[ATC | x]$ and $P_\theta[ACT | x]$ under our model. The first
+and second rows of the matrix $Y$ can be shared between the two
+predictions since they condition on the shared strings ``'' and
+``A''. However, the final row has to be recomputed since in the former
+case, $Y$ conditions on $AT$ whereas in the latter case, it conditions
+on $AC$.
+
+Similarly, KL-divergence between rows of the matrix compares the
+conditional distributions of a single source-target pair. It does not
+suffice. Suppose that we have an extremely simple case where the
+support of the predictive distribution is simply two strings $y_1$ and
+$y_2$ that have observed frequencies $f$ and $1-f$ on input
+$x$. Ideally, the KL-divergence we want to compute is between the two
+vectors $[f, 1-f]$ and $[\hat{f}, 1-\hat{f}]$. But to compute $f$ we
+must walk through the conditional matrix $Y_1$ in a target-dependant
+manner and take the product of the a single entry from each row (by
+the Chain rule).
+
+It would be straightforward to directly predict the desired
+probability distribution. Because the sample space is finite, we could
+do this by predicting a long vector where each entry corresponds to
+the probability of a particular string. However, this vector would be
+intractably large, and almost all entries are 0.
+
+\section*{Proposed Approach}
+
+
+It turns out that this proposed approach is identical to what BE-Hive
+does :( 
+
+
+
+\end{document}
+

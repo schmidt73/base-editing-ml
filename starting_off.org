@@ -1,0 +1,503 @@
+* Planning to Plan
+
+The most important aspect of any project is the following: strong
+motivation. Without this, efforts will necessarily be wasted. We need
+to perform a deeper level of analysis in comparing to existing
+methods; we also need to be able to reproduce previous results.
+
+So far, we have compared the fraction of canonical C>T and
+non-canonical C>A/G base-edits to the predicted fraction by BE-Hive.
+
+Q: Is independence of outcomes a fair model assumption?
+
+Q: How do we encode features?  
+A: I like the idea of using linearly independent vectors using like a
+fourier transform idea. For such a simple alphabet, I doubt this
+matters too much.
+
+Q: Could we use the genome itself as a corpus for unsupervised
+pre-training?
+A: Look here: cite:radford2018improving
+
+Q: This is biology. We want to attribute results to features. How do
+we do this?
+
+** Data Collection
+
+   Driving question: where can we get data to build our model and will
+   it be uniform enough to allow for strong learning?
+   
+   Obviously the BE-Hive paper has processed data to look at. 
+
+   Q: Should we re-do the processing from scratch to make it all
+   uniform?
+   Q: How much data do we need?
+   Q: How much data is there?
+   
+   | Paper                                      | # sgRNAs Screened |   |
+   |--------------------------------------------+-------------------+---|
+   | cite:CUELLAMARTIN20211081                  | 11,000            |   |
+   | cite:arbab20_deter_base_editin_outcom_from | 38,538            |   |
+   |                                            |                   |   |
+   |                                            |                   |   |
+   
+   Our data has too much of a non-fixed hierarchical structure to
+   elegantly pack it into a DataFrame. Instead, we could simply pack
+   everything into a JSON object where each entry represents a
+   particular screen, sgRNA combo and the value of the entry is the
+   set of all outcomes. It's really the only sensible thing we can do
+   because of the lack of independence.
+ 
+** Types of Base Editors
+   
+   - F2X
+   - FNLSNG
+   - RA2
+   - BE3
+
+** Types of Screens
+
+   There are several ways to evaluate the performance of a
+   base-editor, maybe if we can combine these multiple ideas together
+   we can get more signal out of our predictor.
+
+   This paper cite:CUELLAMARTIN20211081 looks at the LFC
+   (no-sequencing) of the base-editors to determine how well they
+   perform. Maybe we could use LFC as a proxy for editing
+   efficiency. We know that certain types of mutations are likely to
+   alter the amino acid stop codon, which would cause the gene to be
+   depleted. 
+
+   Maybe we could go backwards. Say we have a stop codon that looks
+   like:
+
+            TAG
+            |||
+            ATC
+            
+   Then a mutation of C -> A would change G -> T and result in a
+   non-stop codon. So if we know that this guideRNA targets C and we
+   see a strong LFC, we know that it is editing C -> A with high
+   efficiency. 
+
+   On the other hand if we see a mutation of A -> G in the stop codon:
+
+           TAA
+           |||
+           ATT
+           
+   Then the gene might not deplete as TGA is another valid stop-codon.
+
+   Courtesy of: [[https://en.wikipedia.org/wiki/Stop_codon#:~:text=In%20molecular%20biology%20(specifically%20protein,process%20of%20the%20current%20protein.][Stop Codon Wikipedia Page]]
+   
+   From section 1 of the above paper, we know that there is a strong
+   correlation between "expected" mutational outcome and LFC.
+
+   The thing is this paper looks at 11,000 sgRNAs. It would be really
+   great if we could infer something from their data.
+
+*** Lukas Lab Screen
+    For this screen they used an in-house developed lentiviral
+    backbone called LRT2B that contains the sgRNAs. Then transduced
+    the cells with the backbone + sgRNA complex and selected with
+    Blasticidin for 5 days after which they harvest the sgRNA.
+    
+    To build the lentiviral library they do shotgun cloning with no
+    individual picking, which means that there will be errors in many
+    of the lentiviruses. This is why we select only when the full
+    sgRNA complex looks correct; otherwise we would only need to look
+    at the target.
+    
+    The backbone paper: cite:zafra18_optim_base_editor_enabl_effic 
+
+*** EditR Screen
+    Paper: cite:doi:10.1089/crispr.2018.0014 
+
+    Looks like they model base editing events as occuring
+    independently (though it is unknown if this is the case). They
+    also develop a clever method to get base editing outcome data
+    based off of flourescence sequencing. I don't know how large their
+    dataset is, but it looks like it could be interesting.
+
+    They cite a lot of different papers
+
+*** BE-Hive Screen
+    Paper: cite:arbab20_deter_base_editin_outcom_from
+    
+    BE Plasmids were created by using a Blasticidin resistant BE
+    expressing casette. The sgRNA targets contained randomly selected
+    native flanking sequences. 
+
+    It's interesting, they split their data up into multiple parts,
+    and editing efficiency and bystander editing data.
+
+    Efficiency: https://doi.org/10.6084/m9.figshare.10673816
+    Bystander:  https://doi.org/10.6084/m9.figshare.10678097
+
+    I would think that one is a function of the other... Can verify
+    this myself.
+    
+    No they are not functions of each other. The one first set of
+    files gives the total number of C>T edits at position n, and the
+    second is the distribution of edits conditioned upon the fact that
+    there is a C>T edit at position n.
+
+    [[file:scripts/be_hive_data.py::efficiency_df[efficiency_df['Name (unique)'] == query\]][Basic Data Analysis]]
+    
+    They use only one replicate for some of the guides. I don't know
+    why they don't use the replicates for all of them. You can see
+    this in the CSV and in the pickled dataframes...
+
+    | Index | Public base editor | Internal base editor | Celltype | Model name                                 |
+    |-------+--------------------+----------------------+----------+--------------------------------------------|
+    |     0 | ABE-CP1040         | ABE-CP1040           | HEK293T  | HEK293T_12kChar_ABE-CP1040_bestmodel       |
+    |     1 | ABE                | ABE                  | HEK293T  | HEK293T_12kChar_ABE_bestmodel              |
+    |     2 | AID                | AID                  | HEK293T  | HEK293T_12kChar_AID_bestmodel              |
+    |     3 | BE4-CP1028         | BE4-CP1028           | HEK293T  | HEK293T_12kChar_BE4-CP1028_bestmodel       |
+    |     4 | BE4                | BE4                  | HEK293T  | HEK293T_12kChar_BE4_bestmodel              |
+    |     5 | BE4-H47ES48A       | BE4max_H47ES48A      | HEK293T  | HEK293T_12kChar_BE4max_H47ES48A_bestmodel  |
+    |     6 | CDA                | CDA                  | HEK293T  | HEK293T_12kChar_CDA_bestmodel              |
+    |     7 | eA3A               | eA3A                 | HEK293T  | HEK293T_12kChar_eA3A_bestmodel             |
+    |     8 | eA3A-T44DS45A      | eA3Amax_T44DS45A     | HEK293T  | HEK293T_12kChar_eA3Amax_T44DS45A_bestmodel |
+    |     9 | evoAPOBEC          | evoAPOBEC            | HEK293T  | HEK293T_12kChar_evoAPOBEC_bestmodel        |
+    |    10 | ABE-CP1040         | ABE-CP1040           | P2L-mESC | mES_12kChar_ABE-CP1040_bestmodel           |
+    |    11 | ABE                | ABE                  | P2L-mESC | mES_12kChar_ABE_bestmodel                  |
+    |    12 | AID                | AID                  | P2L-mESC | mES_12kChar_AID_bestmodel                  |
+    |    13 | BE4-CP1028         | BE4-CP1028           | P2L-mESC | mES_12kChar_BE4-CP1028_bestmodel           |
+    |    14 | BE4                | BE4                  | P2L-mESC | mES_12kChar_BE4_bestmodel                  |
+    |    15 | CDA                | CDA                  | P2L-mESC | mES_12kChar_CDA_bestmodel                  |
+    |    16 | eA3A               | eA3A                 | P2L-mESC | mES_12kChar_eA3A_bestmodel                 |
+    |    17 | evoAPOBEC          | evoAPOBEC            | P2L-mESC | mES_12kChar_evoAPOBEC_bestmodel            |
+    |    18 | BE4-H47ES48A       | BE4_H47ES48A         | P2L-mESC | mES_12kChar_BE4_H47ES48A_bestmodel         |
+    |    19 | eA3A_T31A          | eA3A_T31A            | P2L-mESC | mES_12kChar_eA3A_T31A_bestmodel            |
+    |    20 | eA3A_T31AT44A      | eA3A_T31AT44A        | P2L-mESC | mES_12kChar_eA3A_T31AT44A_bestmodel        |
+    |    21 | ABE8               | ABE8                 | P2L-mESC | mES_12kChar_ABE8_bestmodel                 |
+* Building A Model
+
+Prior to building a model, it is necessary to perform a ML
+sequence-to-sequence literature review. There are a couple aspects of
+the problem that I believe are important to think about during this
+review:
+
+  - Strong observed conservation between base-editors
+  - Non-linear sequence correlations in sgRNAs
+
+The first is interesting because it is a non-artificial decomposition
+of the problem that allows us to learn with more data. For example,
+maybe one can map outcomes between wide and narrow base-editors with a
+probabilistic "filter" that amplifies the probability of events within
+the narrow window and decreases the probability of events outside the
+narrow window.
+
+The second is useful to think about during the review because it
+relates to our learning task. Machine translation models often
+explicitly *model* linear or temporal correlations. This is sensible
+because in natural language the subsequent token has dependencies on
+past tokens, but it is not necessarily sensible in our case.
+
+Off the top of my head, I should review (in order):
+
+  - Recurrent Neural Networks
+  - LSTMs
+  - Attention Based Architectures
+  - Transform Architecture
+    
+** Convolutional Approach
+
+Paper #1: cite:gehring2017convolutional
+
+I like the convolutional approach because we are working with fixed
+length sequences and it intuitively makes sense that we don't need to
+learn temporal dependencies...
+
+What the fuck are convolutional layers: https://en.wikipedia.org/wiki/Convolutional_neural_network#Convolutional_layer
+
+Based off the name I would think that they have to do with shift
+invariance.
+
+Paper #2: cite:gehring2017convolutional
+
+Talks about how many machine translation tasks use an encoder-decoder
+approach where they squash a sentence down to a fixed length vector
+and then decode it into the translated sentence. But that this fails
+for long sentences that are not in the training corpus.
+
+Section 2.1 describes ^: RNN for encoder, where the encoding is a
+function of the hidden states. For example the encoding can be taken
+to be the last hidden state. 
+
+Q: Do they train the encoder and decoder seperately?  
+A: I don't think so... Difficult to train an encoder without a decoder
+of some kind.
+
+Decoder tries to predict the next sentence token by taking this
+context vector and the previously predicted symbols, and outputting a
+new symbol.
+
+Q: HOW DO THEY TRAIN THIS THING?!?!?!?!?!?  
+A: They can unroll it into one large feedforward network 
+and then perform standard back-prop at last step. Another thing they could do is 
+unroll the first part, and then do on-line gradient descent on the last step. 
+
+^ Interesting strategy but not state-of-the-art anymore, back to P1:
+cite:gehring2017convolutional
+
+Nice bit on convolutions:
+https://www.cs.cornell.edu/courses/cs1114/2013sp/sections/S06_convolution.pdf
+
+1D and 2D convolutions are like "smoothing" and "emphasis" operations
+written in terms of higher-order inner-products of images/signals with
+filters.
+
+Paper #3: cite:vaswani2017attention
+
+Proposes architecture eschewing sequential or convolutional processing
+and implemented solely with attention mechanisms.
+
+Employs the identity function trick around each sublayer. 
+
+They formulate attention as a mapping from a query and set of
+key-value pairs to an output 
+
+RNNs are used in for
+
+Paper #4: cite:devlin2018bert
+
+Not that impressed they just develop a simple strategy to do both
+forward-and-backward prediction. With a naive approach this wouldn't
+work because you could trivially see the token you are trying to
+predict. Their approach instead tackles an alternative training task
+where a subset of the words are masked. This obviously does not
+optimize for the downstream task of next token prediction, but it is a
+useful pre-training step.
+
+Paper #5: cite:liu2018generating 
+
+This suggets that the entire encoder-decoder network is not necessary
+for the text summarization task. I prefer a simpler architecture where
+possible (Occam's Razor), so this may be a promising direction. 
+
+Great: http://jalammar.github.io/illustrated-transformer/
+
+Paper #6: cite:yang2019xlnet 
+
+Problems prior to BERT: context dependency; we only condition on
+tokens up to the given point, not tokens after that point. Seems
+especially strange in the conext of DNA reconstruction since DNA can
+be mutated from all angles.
+
+Problems with BERT: assumes that predicting one masked token is
+independent of predicting another.
+
+A little confused why the AR framework doesn't have the independence
+assumption problem. Ahh, because it does not assume that later tokens
+are independent of earlier ones.
+
+Solution: Take expectation over permutations and use AR inside
+permutation.
+
+Not straightforward because if we take two permutations of:
+   X = DADXYZDADABC
+
+Say X1 = DADXYZDADABC
+and X2 = DADABCZYXDDA
+
+and we want to predict the fourth symbol, the naive parameterization
+knows that the fourth symbol is conditioned on the earlier symbols,
+but because these symbols are the same, we would output the same
+distribution.
+
+So we need to encode information about the "position" of the symbol we
+are trying to predict so as to not have this problem.
+
+Nice example of failings of BERT in section 2.6
+
+This is a great paper.
+
+Very confused about the two-stream self-attention ideas.
+
+Problem is that I don't think Transformer-XL is necessary.
+
+Like the idea of a Lite BERT cite:lan2019albert with fewer paramaters
+
+Looks like huggingface has a nearly complete training and fine-tuning
+thingy majig https://huggingface.co/transformers/training.html#trainer
+
+Need to look at the attention mechanisms in more depth. Really want to
+understand the difference between them because that is really all
+there is to it.
+
+https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00349/96482/A-Primer-in-BERTology-What-We-Know-About-How-BERT
+
+I want to understand the nuances of different attention mechanisms...
+
+Additive attention works like this,
+
+It takes the hidden states of the encoder $(h_1, \dots, h_k)$ and for
+a given output hidden state $s_i$ tries to pay "attention" to various
+parts of this encoding.
+
+$s_i = g(s_{i-1}, c_i)$ where $c_i = a_i^T H$
+
+Thus $a_i$ is the "attention vector" and $a_{i,j}$ is the attention
+paid to $h_j$ at step $i$.
+
+Further, the matrix $H$ has the form,
+
+\begin{pmatrix}
+h_1 & h_2 & \dots & h_k
+\end{pmatrix}
+
+where they are column vectors.
+
+Unfortunately, additive attention needs to learn the weights from the
+softmax of a FFN of the matrix $H$ and the state $s_{i - 1}$.
+
+Instead of this, cite:vaswani2017attention proposes a "scaled-dot
+product attention"
+
+Remember there is no RNN that automatically uses the hidden states as
+the word embeddings. Start by creating an input embedding of the
+sequence $(s_1, \dots, s_k) \rightarrow (w_1, \dots, w_k)$.
+
+Then, we convert this matrix $W$ to a set of queries, keys and values
+using a linear embeddings $W_Q$, $W_K$ and $W_V$.
+
+$Q = W_QW$, $K = W_KW$ and $V = W_VW$
+
+Now this is the important part, in the encoding step we take
+
+$soft(Q^TK)$ to give us a matrix of the form,
+
+\begin{pmatrix}
+a_1(q_1) & a_2(q_1) & \dots & a_k(q_1) \\
+a_1(q_2) & a_2(q_3) & \dots & a_k(q_4) \\
+\vdots
+\end{pmatrix}
+
+Essentially, each row is the amount of attention that we should pay to
+each hidden state $v_i$ for a given word.  That is, the strength of
+the attention paid to each part of the sentence when predicting the
+output word.  This is where we get those nice diagrams with the
+light-to-bold lines telling us how much we are focusing on given
+inputs.
+
+We actually do this several times instead of once because it gives
+better results and call this "multi-head" attention.
+
+Later:
+
+ - https://arxiv.org/abs/1902.10186
+ - https://arxiv.org/abs/1908.04626
+   
+Ahh I think we can't allow for any bidirectionality.
+
+cite:pmlr-v97-so19a
+* Initial Data Processing
+  As we are going to learn a sequence-to-sequence task, it is best if
+  we have our data in that form to allow for unified processing. Maybe
+  it will look something like this:
+   
+   #+begin_src json
+     {
+       "sgrna",
+       "guide-id",
+       "target",
+       "edit-position",
+       "outcomes": [
+         {"output1", "count1"}
+         ...
+         {"outputN", "countN"}
+       ]
+     }
+   #+end_src
+
+   After we have our data in this form the we want to verify that the
+   base-editors behave similarly across the various screens. We also
+
+   want "basic stats" about the screens like:
+
+   - # of sgRNAs screened in eah library
+     - Multiplicity of sgRNAs for each screen (i.e. how many "training
+       samples")
+   - Types of base-editors used
+     - Important is the mapping between "different" base-editrs
+   - Cell lines screened
+     
+   The following script processes BE-Hive data into a unified format:
+
+   [[file:scripts/process_behive.py::if __name__ == "__main__":][Data Processor]]
+
+   It seems as if many of the BE-Hive files are corrupted, but not all
+   of them. For example, I am having trouble with:
+
+   - mES_12kChar_BE4.csv and mES_12kChar_BE4.pkl
+
+   The good ones so far seem to be:
+   
+   - mES_12kChar_BE4_H47ES48A.csv and mES_12kChar_BE4_H47ES48A.pkl
+
+** BE-Hive Data
+   
+   They "We discarded data points with fewer than 100 edited reads,"
+   in their Bystander editing model.
+   
+   Q: What is an aberrant edit?  
+
+   A: Aberrant edits are a subset of all edits; probably used
+   internally for naming a certain subset of edits that are
+   interesting. We don't need to use them though because they are
+   included in the bystander df which contains ALL edits.
+
+   COMMENT: Some of the total counts are non-integral... This is
+   because sometimes the number of aberrant edits in non-integral,
+   which doesn't particularly make much sense. Maybe it is because it
+   is computed as a fraction and loss of precision comes in
+   somewhere? I doubt this though because we are working with
+   relatively small floating points.
+    
+* General Project Notes/Ideas
+  
+  An important thing is the frequency of base-editing events across
+  different editors (in the same cell-line) and the distribution of
+  "standard" vs "non-standard" base-editing event frequencies.
+
+  Some of this has definitely been done by Lukas. But not much has
+  directly compared different editors. 
+  
+  Another thing that is very important is to understand which sequence
+  features correspond to C>T edit. It looks like what they did was
+  train logistic regression classifier and then perform feature
+  attribution by looking at the one-hot-encoded weights. (They is
+  BE-Hive in this case). This sentence, "All nucleotides within a
+  10-bp radius of the target position were one-hot-encoded. Position
+  was not used as a feature," suggests that they only looked at
+  editing efficiency at the target, which makes sense since logistic
+  regression predicts only a probability. 
+
+  Lukas had that note about how it seems that certain sequence
+  features were selected differently than in BE-Hive. Maybe it would
+  be a good idea to wrangle the data and perform this same strategy to
+  see if the differences appear.
+
+  Probit regression has a nice latent variable interpretation. Maybe
+  I'll try this too.
+
+* MEETINGS
+** One-on-one with Rui
+   <2021-04-15 Thu>
+   
+   Questions:
+   - Which attention mechanisms have you used?
+   - 
+
+   Transformer architecture:
+
+   About BE-Hive data:
+   
+   - Training is not easy, so pick a very simple attention structure
+     initially.
+   - Pick something super simple - two attention, two layers.
+   - Position wise embedding and kmers.
+   - 
+

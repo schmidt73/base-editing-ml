@@ -1,0 +1,285 @@
+\documentclass{beamer}
+
+\usepackage{tikz}
+\usetheme{metropolis}
+
+\def\checkmark{\tikz\fill[scale=0.4](0,.35) -- (.25,0) -- (1,.7) -- (.25,.15) -- cycle;}
+
+\title{ML for Base Editing Assay Data}
+\date{\today}
+\author{Henri Schmidt}
+\institute{Memorial Sloan Kettering Cancer Center}
+
+\begin{document}
+\maketitle
+
+\section{Relevant Work}
+\begin{frame}
+  \frametitle{Relevant Papers} There are two relevant papers
+  approaching this problem, one is published in cell from David Liu's
+  lab. The other is in BioArxiv.
+  \vspace{0.5em}
+  \begin{itemize}
+  \item Arbab, M., Shen, M. W., Mok, B., Wilson, C., Matuszek, Ż.,
+    Cassa, C. A., \& Liu, D. R., Determinants of base editing outcomes
+    from target library analysis and machine learning, Cell, 182(2),
+    463–480–30 (2020).
+  \item Marquart, K. F., Allam, A., Janjuha, S., Sintsova, A.,
+    Villiger, L., Frey, N., Krauthammer, M., …, Predicting base
+    editing outcomes with an attention-based deep learning algorithm
+    trained on high-throughput target library screens, bioRxiv, (),
+    (2020).
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{BE-Dict Assay}
+
+  \begin{figure}[ht]
+    \centering
+    \includegraphics[width=10cm]{figures/F1.large.jpg}
+    \caption{\label{fig:label} BE-Dict Assay Setup}
+  \end{figure}
+
+  \begin{itemize}
+  \item sgRNAs from 18,946 random sequences and 4,123 disease loci
+  \item sgRNAs have A/C nucleotide in editing window (positions 3-11)
+  \item Single cell line screened: HEK293T cells
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{BE-Dict Model}
+
+  \begin{figure}[ht]
+    \centering
+    \includegraphics[width=9cm]{figures/F2.large.jpg}
+    \caption{\label{fig:label} BE-Dict Model}
+  \end{figure}
+
+  \begin{itemize}
+  \item Uses an architecture with only one
+    self-attention layer
+  \item Assumes independence of editing probability between
+    nucleotides
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{BE-Hive Assay}
+
+  \begin{figure}[ht]
+    \centering
+    \includegraphics[height=5cm]{figures/behive_screen.jpg}
+  \end{figure}
+  \vspace{-1em}
+
+  \begin{itemize}
+  \item Flanking sequences come from random locations in hg38
+  \item One set of sgRNAs iterate 3 nucleotides around each side of
+    target nucleotide (position 6)
+  \item The other set iterates a portion of the flanking sequence 
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{BE-Hive Model}
+
+  There are two components to the BE-Hive model, it first learns an
+  ``efficiency'' model that computes the probability of ``any'' edit
+  occuring. That is, it learns:
+  $$Pr[G \text{ Edits}\ : G]$$
+  The second component to the model predicts the probability of a
+  sequence outcome occuring, conditioned on an editing event. That is,
+  it learns:
+  $$Pr[\text{Outcome } S\ : G \text{ Edits}, G]$$
+
+  Then applying the chain rule, we can compute the desire posterior,
+  \[
+    Pr[\text{Outcome } S\ :  G] =
+  Pr[\text{Outcome } S\ : G \text{ Edits}, G]\cdot
+  Pr[G \text{ Edits}\ : G]
+  \]
+\end{frame}
+
+\begin{frame}
+  \frametitle{BE-Hive Model}
+
+  \begin{figure}[h]
+    \centering
+    \includegraphics[height=3.5cm]{figures/behive_bystander.jpg}
+    %\caption{\label{fig:label} BE-Hive Bystander Model}
+  \end{figure}
+  \vspace{-0.4em}
+
+  \begin{itemize}
+  \item Editing efficiency model uses gradient boosted regression
+    trees from scikit-learn
+  \item Bystander model uses a generative deep conditional
+    autoregressive model
+    \begin{itemize}
+    \item Encodes each substrate nucleotide and context using a shared
+      encoder
+    \item Builds the output sequence iteratively, conditioning on
+      previously generated outcomes
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Base Editors/Cell Lines}
+  The base-editor used varies across the screens. BE-Hive and BE-Dict
+  use the same cell-lines, but it is worth noting that the Lukas Lab
+  Screen only uses cytosine base editors.
+
+  \vspace{0.5em}
+
+  \begin{center}
+  \begin{tabular}{c|c|c|c}
+    Base Editor & Dow Lab & BE-Hive & BE-Dict \\
+    \hline
+    BE4Max & FNLS & \checkmark & \checkmark\\
+    F2X & \checkmark & $\times$ & $\times$ \\
+    FNLSNG & \checkmark & $\times$ & $\times$ \\
+    AID & $\times$ & \checkmark & Target-AID \\
+    ABE8 & $\times$ & \checkmark & \checkmark \\
+  \end{tabular}
+  \end{center}
+\end{frame}
+
+\begin{frame}{Data Set Size}
+  I'm positive that we have at least this much data from the Dow Lab,
+  but I might be missing some of the new screens they have done. More
+  screens are currently being performed as well.
+
+  \vspace{0.5em}
+
+  \begin{center}
+  \begin{tabular}{c|c|c|c|c}
+    & \# sgRNAs & \# Editors & \# Cell Lines & Total \\
+    \hline
+    BE-Hive & 6,000 & 10 & 2 & $\sim$ 120,000 \\
+    BE-Dict & 22,619 & 4 & 1 & $\sim$ 90,000 \\
+    Dow Lab & 10,538 & 3 & 5 & $\sim$ 150,000 \\
+  \end{tabular}
+  \end{center}
+\end{frame} 
+
+\section{New Directions}
+
+\begin{frame}
+  \frametitle{Dow Lab Assay}
+
+  \begin{itemize}
+  \item \textbf{Non-random} approach to library design
+  \item Targets cancer associated genes in mouse and human stem cell
+    lines
+  \item Uses base-editors that can target broader PAMs
+  \item Same lentiviral guide-target $\rightarrow$ NGS strategy
+  \item BE-Hive is poorly predictive of their screen outcome
+  \item We also see novel PAM editing
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Dow Lab Screen}
+  \begin{figure}[ht]
+    \centering
+    \includegraphics[width=10cm]{figures/HBES_RA2_vs_BE4_NGG_3_8.png}
+    \caption{\label{fig:label} BE-Hive Editing Efficiency Prediction vs
+      True C\textgreater N editing. SpearmanR of 0.414.}
+  \end{figure}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Issues With Current SOA}
+
+  \begin{itemize}
+  \item BE-Dict:
+    \begin{itemize}
+    \item Assumes independence of per-nucleotide editing
+    \end{itemize}
+  \item BE-Hive:
+    \begin{itemize}
+    \item Has combinatorial space to explore and resorts to a
+      heuristic to prune it
+    \item Models sequence prediction dependencies linearly; this does
+      not seem to be a reasonable assumption
+    \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Data Format}
+
+  The data from all the screens can be unified into the following
+  format after screen specific pre-processing.
+
+  Let us denote a 20-mer gRNA as $g$. From our screen we observe a
+  sparse probability distribution,
+  $$P_g : \{A,T,C,G\}^{20} \rightarrow [0, 1]$$
+  Of course, we also have access to the counts directly, which can
+  allow us to weight observations by a confidence.
+  
+\end{frame}
+\begin{frame}
+  \frametitle{Obvious Improvements}
+
+  \begin{itemize}
+  \item We can leverage more data to build our model
+  \item We have access to improvements in ML literature
+  \item Not much work has been done in the feature-attribution domain
+  \item We can incorporate PAM information into our model
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Pre-training With Inter Cell-Line Data}
+
+  \begin{figure}[ht]
+    \centering
+    \includegraphics[width=9cm]{figures/mbes_cross_cmp.png}
+    \caption{\label{fig:label} The editing efficiency of targeted
+      C\textgreater T transition mutations between multiple
+      cell-lines.}
+  \end{figure}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Pre-training With Inter-Cellular Data}
+
+  \begin{itemize}
+  \item Existing models only had two cell-lines to train on, so this
+    wasn't much of an issue
+  \item Now we have data from 8-10 different cell-lines \textbf{for
+      each base-editor} 
+  \item We could use data from all cell-lines to pre-train our network
+    since there is a strong inter-cellular signal
+    \begin{itemize}
+    \item BERT models have seen improvements doing unsupervised
+      pre-training prior to task specific training for natural language
+    \end{itemize}
+  \item I think this could be taken quite a bit further; there are a
+    lot of other base-editing screens out there, but they just sgRNA
+    measure depletion. And what about the similarity between
+    base-editors?
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Exciting Models}
+
+  I conclude with some ideas of exciting models for this task.
+
+  \begin{itemize}
+  \item Convolutional and RNN architectures are out of date for the
+    machine translation task
+  \item We have short-fixed length sequences, it makes little sense to
+    need an RNN here
+  \item I like the idea of XLNet (2019) because it does not make any
+    independence assumptions on our data
+  \item I like the smaller model ALBERT (2020) as it will be easier to
+    train and test while achieving similar performance
+  \end{itemize}
+\end{frame}
+
+\end{document}

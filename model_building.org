@@ -1,0 +1,6 @@
+* Architecture
+  
+  It seems like I will have to modify the loss-function to get
+  anything useful out of the model.  
+
+  cite:cho2014learning
