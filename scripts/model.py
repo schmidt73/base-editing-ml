@@ -1,3 +1,4 @@
+import argparse
 import json
 import time
 import math
@@ -15,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from tqdm import tqdm
+from loguru import logger
 from funcy import partition
 from torch.autograd import Variable
 
@@ -411,6 +412,11 @@ HYPER_PARAMETERS = {
     'd_model': 128,
 }
 
+TRAINING_PARAMETERS = {
+    'lr': 0.001,
+    'momentum': 0.9   
+}
+
 class KLCriterion(nn.Module):
     def __init__(self):
         super(KLCriterion, self).__init__()
@@ -421,7 +427,7 @@ class KLCriterion(nn.Module):
         P = P.sum(-1).sum(-1).log_softmax(dim=-1) # compute LOG probabilities
         return self.crit(P, F)
 
-class SimpleLossCompute():
+class ComputeLoss():
     "A simple loss compute and train function."
     def __init__(self, generator, criterion, opt=None):
         self.generator = generator
@@ -454,57 +460,120 @@ def run_epoch(batch_iter, model, loss_compute, device):
         tokens += ntokens
         if i % 10 == 1:
             elapsed = time.time() - start
-            print("Epoch Step: %d Loss: %f Tokens per Sec: %f" %
-                    (i, loss / ntokens, tokens / elapsed))
+            logger.info(f"Step {i} Loss: {loss / ntokens} "
+                        f"Tokens per Sec: {tokens / elapsed}")
             start = time.time()
             tokens = 0
     return total_loss / total_tokens
 
-if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=UserWarning) 
-
+def initialize_device():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(f'Device is: {device}')
+    return device
 
-    training_df = pd.read_csv(sys.argv[1])
-    test_df = pd.read_csv(sys.argv[2])
+def train_model(device, args):
+    logger.info(f'Loaded tensors onto {str(device).upper()}')
+
+    training_df = pd.read_csv(args.training_data)
 
     model = make_model(**HYPER_PARAMETERS)
 
     criterion = KLCriterion()
-    optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-    loss_compute = SimpleLossCompute(model.generator, criterion, optimizer)
+    optimizer = optim.SGD(model.parameters(), **TRAINING_PARAMETERS)
+    loss_compute = ComputeLoss(model.generator, criterion, optimizer)
 
     model.to(device)
     criterion.to(device)
 
-    losses = []
-    for epoch in range(100):
-        training_iter = create_batches(training_df, device)
-        test_iter = create_batches(test_df, device)
+    start_epoch = 0
+    if args.load_checkpoint is not None:
+        model_state = torch.load(args.load_checkpoint)
+        model.load_state_dict(model_state['model'])
+        start_epoch = model_state['epoch']
 
-        print(f'=========EPOCH {epoch}=========')
+    losses = []
+    for epoch in range(start_epoch, start_epoch + args.epochs):
+        training_iter = create_batches(training_df, device)
+
+        logger.info(f'=========EPOCH {epoch}=========')
         model.train()
         training_loss = run_epoch(training_iter, model, loss_compute, device)
-        print(f'Training loss: {training_loss}')
+        logger.info(f'Training loss: {training_loss}')
 
-        model.eval()
-        test_loss = run_epoch(test_iter, model, loss_compute, device)
-        print(f'Test loss: {test_loss}')
+        if args.checkpoint is not None:
+            model_state = {
+                'epoch': epoch,
+                'training_loss': training_loss,
+                'model': model.state_dict()
+            }
 
-        losses.append({
-            'epoch': epoch,
-            'test_loss': test_loss,
-            'training_loss': training_loss
-        })
+            torch.save(model_state, args.checkpoint) 
 
-        with open('model_loss.json', 'w') as f:
-            f.write(json.dumps(losses))
+    if args.save is not None:
+        torch.save(model.state_dict(), args.save) 
 
-        state = {
-            'epoch': epoch,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-        }
+######################
+##    Run Model     ##
+######################
 
-        torch.save(state, "model_state.torch") 
+def run_model(device, args):
+    model = make_model(**HYPER_PARAMETERS)
+    model.to(device)
+
+    if args.load is not None:
+        model_state = torch.load(args.load)
+        model.load_state_dict(model_state)
+
+######################
+## Argument Parsing ##
+######################
+
+def parse_args():
+    parser = argparse.ArgumentParser(prog='base-editing-ml')
+    subparsers = parser.add_subparsers(help='Train or run model on dataset')
+
+    parser_train = subparsers.add_parser('train', help='Train base-editing')
+    parser_train.add_argument(
+        'training_data',
+        help='CSV file that contains training data',
+        type=argparse.FileType('rb')
+    )
+    parser_train.add_argument(
+        '-c', '--checkpoint',
+        help='File to store intermediary training state',
+        type=argparse.FileType('wb')
+    )
+    parser_train.add_argument(
+        '-e', '--epochs',
+        help='Number of epochs to run',
+        type=int, default=100, 
+    )
+    parser_train.add_argument(
+        '-s', '--save',
+        help='File to store trained model',
+        type=argparse.FileType('wb')
+    )
+    parser_train.add_argument(
+        '-l', '--load-checkpoint',
+        help='File containing stored training state',
+        type=argparse.FileType('rb')
+    )
+    parser_train.set_defaults(func=train_model)
+
+    parser_run = subparsers.add_parser('run', help='Run base-editing')
+    parser_run.add_argument(
+        '-l', '--load',
+        help='File containing model parameters',
+        type=argparse.FileType('rb')
+    )
+    parser_run.set_defaults(func=run_model)
+
+    return parser.parse_args()
+
+if __name__ == "__main__":
+    warnings.filterwarnings("ignore", category=UserWarning) 
+
+    args = parse_args()
+    device = initialize_device()
+
+    args.func(device, args)
+
