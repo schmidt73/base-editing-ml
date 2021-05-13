@@ -418,7 +418,7 @@ class KLCriterion(nn.Module):
 
     def forward(self, out, Y, F):
         P = Y.mul(out)
-        P = P.sum(-1).sum(-1).exp().log_softmax(dim=-1) # compute LOG probabilities
+        P = P.sum(-1).sum(-1).log_softmax(dim=-1) # compute LOG probabilities
         return self.crit(P, F)
 
 class SimpleLossCompute():
@@ -461,7 +461,6 @@ def run_epoch(batch_iter, model, loss_compute, device):
     return total_loss / total_tokens
 
 if __name__ == "__main__":
-    warnings.filterwarnings("ignore", category=DeprecationWarning) 
     warnings.filterwarnings("ignore", category=UserWarning) 
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
