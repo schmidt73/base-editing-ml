@@ -1,8 +1,6 @@
 import argparse
-import json
 import time
 import math
-import sys
 import copy
 import random
 import warnings
@@ -29,8 +27,10 @@ first  = lambda x: x[0]
 second = lambda x: x[1]
 third  = lambda x: x[2]
 
+NUCS=list("ATCG")
+
 def random_dna_sequence(k=20):
-    return ''.join(random.choices(list("ATCG"), k=k))
+    return ''.join(random.choices(NUCS, k=k))
 
 '''
 Converts a string to a list of kmers of a specified size.  On the
@@ -40,7 +40,7 @@ For example,
   list(get_kmers('ACGT', k = 3)) == ['BAC', 'ACG', 'CGT', 'GTB']
 '''
 def get_kmers(seq, k=3, boundary='B'):
-    kmers, d = [], (k - 1) // 2
+    d = (k - 1) // 2
     for i in range(len(seq)):
         if i - d < 0:
             yield (boundary * (d - i)) + seq[:i+d+1]
@@ -71,7 +71,7 @@ def kmer_encoding(k=3):
     kmers = gen_kmers(['A', 'T', 'C', 'G', 'B'], k)
 
     # Ensures the encoding is a power of 2
-    dim = int(2 ** np.ceil(np.log2(len(kmers))))
+    dim = int(2 ** math.ceil(np.log2(len(kmers))))
     for i in range(len(kmers)):
         enc = torch.zeros(dim)
         enc[i] = 1
@@ -96,7 +96,7 @@ def one_hot(seq):
     enc = list(map(lambda k: ONE_HOT_MAP[k], get_kmers(seq, k=1)))
     return torch.stack(enc)
 
-DECODE_MAP  = {v.argmax().item(): k for k, v in ONE_HOT_MAP.items()}
+DECODE_MAP  = {v.argmax().item(): k for k, v in ONE_HOT_MAP_KMER.items()}
 def decode_output(output_tensor):
     values = torch.argmax(output_tensor, dim=-1).flatten().tolist()
     return ''.join([DECODE_MAP[n][1] if n in DECODE_MAP else '?' for n in values])
@@ -117,15 +117,15 @@ def tensorfy_targets(targets, max_targets):
 
     # Ensure that we have the same number of targets across batch
     # by padding with random targets
-    for i in range(max_targets - len(targets)):
+    for _ in range(max_targets - len(targets)):
         dna = random_dna_sequence(k=dna_len)
         tensors.append([one_hot(dna), one_hot_kmer(dna), 0])
 
-    embedding_tensor_target = torch.stack(list(map(first, tensors)))
-    embedding_tensor_train = torch.stack(list(map(second, tensors)))
+    #embedding_tensor_target = torch.stack(list(map(first, tensors)))
+    embedding_tensor = torch.stack(list(map(second, tensors)))
     frequency_tensor = torch.tensor(list(map(third, tensors)))
 
-    return embedding_tensor_target, embedding_tensor_train, frequency_tensor
+    return embedding_tensor, frequency_tensor
 
 def create_batches(df, device, batch_size=16):
     def create_batch(sgrna_ids):
@@ -140,18 +140,17 @@ def create_batches(df, device, batch_size=16):
         )
 
         inputs = torch.stack(list(batch.apply(first))).to(device)
-        Y_test = torch.stack(list(batch.apply(lambda x: x[1][0]))).to(device)
-        Y_train = torch.stack(list(batch.apply(lambda x: x[1][1]))).to(device)
-        frequencies = torch.stack(list(batch.apply(lambda x: x[1][2]))).to(device)
+        Y = torch.stack(list(batch.apply(lambda x: x[1][0]))).to(device)
+        frequencies = torch.stack(list(batch.apply(lambda x: x[1][1]))).to(device)
 
-        return inputs, Y_test, Y_train, frequencies
+        return inputs, Y, frequencies
 
     df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
     df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
     df['frequency'] = df['count'] / df['total']
 
     sgrnas = df['sgrna_id'].sample(df['sgrna_id'].size).unique()
-    for batch in partition(16, sgrnas):
+    for batch in partition(batch_size, sgrnas):
         yield create_batch(batch)
 
 ###########
@@ -372,7 +371,7 @@ class PositionalEncoding(nn.Module):
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
         
-    def forward(self, x):
+    def forward(self, x) -> torch.Tensor:
         x = x + Variable(self.pe[:, :x.size(1)], 
                          requires_grad=False)
         return self.dropout(x)
@@ -404,7 +403,7 @@ def make_model(tgt_vocab=4, N=6,
 #####################
 
 HYPER_PARAMETERS = {
-    'tgt_vocab': 4,
+    'tgt_vocab': 128,
     'dropout': 0.1,
     'N': 2,
     'h': 1,
@@ -450,11 +449,11 @@ def run_epoch(batch_iter, model, loss_compute, device):
     total_tokens = 0
     total_loss = 0
     tokens = 0
-    for i, (X, Y_train, Y_test, F) in enumerate(batch_iter):
+    for i, (X, Y, F) in enumerate(batch_iter):
         mask = subsequent_mask(X.size(-2)).to(device)
         ntokens = X.size(0)
-        out = model.forward(X, Y_test, mask, mask)
-        loss = loss_compute(out, Y_train, F)
+        out = model.forward(X, Y, mask, mask)
+        loss = loss_compute(out, Y, F)
         total_loss += loss
         total_tokens += ntokens
         tokens += ntokens
@@ -488,9 +487,8 @@ def train_model(device, args):
     if args.load_checkpoint is not None:
         model_state = torch.load(args.load_checkpoint)
         model.load_state_dict(model_state['model'])
-        start_epoch = model_state['epoch']
+        start_epoch = model_state['epoch'] + 1
 
-    losses = []
     for epoch in range(start_epoch, start_epoch + args.epochs):
         training_iter = create_batches(training_df, device)
 
@@ -515,13 +513,30 @@ def train_model(device, args):
 ##    Run Model     ##
 ######################
 
+def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
+    X = one_hot_kmer(seq).unsqueeze(0).to(device)
+    mask = subsequent_mask(X.size(-2)).to(device)
+    Y = torch.zeros(X.shape).unsqueeze(0).to(device)
+
+    for i in range(30):
+        res = model.forward(X, Y, mask, mask)
+        res = model.generator(res)
+        N = DECODE_MAP[res[0, 0, i].argmax(-1).item()]
+        Y_i = ONE_HOT_MAP_KMER[N]
+        Y[0, 0, i] = Y_i
+
+    beam_size
+
 def run_model(device, args):
     model = make_model(**HYPER_PARAMETERS)
     model.to(device)
+    model.eval() 
 
     if args.load is not None:
-        model_state = torch.load(args.load)
+        model_state = torch.load(args.load, map_location=device)
         model.load_state_dict(model_state)
+
+    beam_search(device, model, "GAGAGAGCGACACAGACGACGAGCGACGACG")
 
 ######################
 ## Argument Parsing ##
