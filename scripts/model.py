@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from collections import defaultdict
 from loguru import logger
 from funcy import partition
 from torch.autograd import Variable
@@ -105,11 +106,34 @@ def decode_output(output_tensor):
 ## Data Batching ##
 ###################
 
+def tensorfy_conditional(embedding, frequencies):
+    prefix_map  = {():list(range(0, embedding.size(0)))}
+    embedding_p = torch.zeros(embedding.shape)
+
+    # start with column i
+    for i in range(embedding.size(1)):
+        new_prefix_map = defaultdict(list)
+        # start with all rows
+        for prefix, indices in prefix_map.items():
+            row = torch.zeros(embedding.size(-1))
+            for idx in indices:
+                kmer = embedding[idx, i].argmax().item()
+                row[kmer] += frequencies[idx]
+                new_prefix = prefix + (kmer,)
+                new_prefix_map[new_prefix].append(idx)
+
+            s = row.sum()
+            for idx in indices:
+                embedding_p[idx, i] = row / s
+
+        prefix_map = new_prefix_map
+
+    return embedding_p
+
 def tensorfy_target(row):
-    ohe_target = one_hot(row['outcome'])
-    ohe_train  = one_hot_kmer(row['outcome'])
+    ohe = one_hot_kmer(row['outcome'])
     f = row['frequency']
-    return [ohe_target, ohe_train, f]
+    return [ohe, f]
 
 def tensorfy_targets(targets, max_targets):
     dna_len = len(targets.iloc[0]['outcome'])
@@ -119,13 +143,14 @@ def tensorfy_targets(targets, max_targets):
     # by padding with random targets
     for _ in range(max_targets - len(targets)):
         dna = random_dna_sequence(k=dna_len)
-        tensors.append([one_hot(dna), one_hot_kmer(dna), 0])
+        tensors.append([one_hot_kmer(dna), 0])
 
-    #embedding_tensor_target = torch.stack(list(map(first, tensors)))
-    embedding_tensor = torch.stack(list(map(second, tensors)))
-    frequency_tensor = torch.tensor(list(map(third, tensors)))
+    embedding_tensor = torch.stack(list(map(first, tensors)))
+    frequency_tensor = torch.tensor(list(map(second, tensors)))
 
-    return embedding_tensor, frequency_tensor
+    embedding_p = tensorfy_conditional(embedding_tensor, frequency_tensor)
+
+    return embedding_tensor, embedding_p
 
 def create_batches(df, device, batch_size=16):
     def create_batch(sgrna_ids):
@@ -140,10 +165,10 @@ def create_batches(df, device, batch_size=16):
         )
 
         inputs = torch.stack(list(batch.apply(first))).to(device)
-        Y = torch.stack(list(batch.apply(lambda x: x[1][0]))).to(device)
-        frequencies = torch.stack(list(batch.apply(lambda x: x[1][1]))).to(device)
+        Y_h = torch.stack(list(batch.apply(lambda x: x[1][0]))).to(device)
+        Y_p = torch.stack(list(batch.apply(lambda x: x[1][1]))).to(device)
 
-        return inputs, Y, frequencies
+        return inputs, Y_h, Y_p
 
     df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
     df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
@@ -421,10 +446,8 @@ class KLCriterion(nn.Module):
         super(KLCriterion, self).__init__()
         self.crit = nn.KLDivLoss(reduction='batchmean')
 
-    def forward(self, out, Y, F):
-        P = Y.mul(out)
-        P = P.sum(-1).sum(-1).log_softmax(dim=-1) # compute LOG probabilities
-        return self.crit(P, F)
+    def forward(self, out, Y_p):
+        return self.crit(out, Y_p)
 
 class ComputeLoss():
     "A simple loss compute and train function."
@@ -433,9 +456,9 @@ class ComputeLoss():
         self.criterion = criterion
         self.opt = opt
         
-    def __call__(self, out, Y, F):
+    def __call__(self, out, Y_p):
         out = self.generator(out)
-        loss = self.criterion(out, Y, F)
+        loss = self.criterion(out, Y_p)
 
         loss.backward()
         if self.opt is not None:
@@ -449,11 +472,11 @@ def run_epoch(batch_iter, model, loss_compute, device):
     total_tokens = 0
     total_loss = 0
     tokens = 0
-    for i, (X, Y, F) in enumerate(batch_iter):
+    for i, (X, Y_h, Y_p) in enumerate(batch_iter):
         mask = subsequent_mask(X.size(-2)).to(device)
         ntokens = X.size(0)
-        out = model.forward(X, Y, mask, mask)
-        loss = loss_compute(out, Y, F)
+        out = model.forward(X, Y_h, mask, mask)
+        loss = loss_compute(out, Y_p)
         total_loss += loss
         total_tokens += ntokens
         tokens += ntokens
@@ -522,6 +545,7 @@ def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
         res = model.forward(X, Y, mask, mask)
         res = model.generator(res)
         N = DECODE_MAP[res[0, 0, i].argmax(-1).item()]
+        print(N)
         Y_i = ONE_HOT_MAP_KMER[N]
         Y[0, 0, i] = Y_i
 
