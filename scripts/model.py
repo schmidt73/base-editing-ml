@@ -1,4 +1,5 @@
 import argparse
+import sys
 import time
 import math
 import copy
@@ -139,12 +140,6 @@ def tensorfy_targets(targets, max_targets):
     dna_len = len(targets.iloc[0]['outcome'])
     tensors = list(targets.apply(tensorfy_target, axis=1))
 
-    # Ensure that we have the same number of targets across batch
-    # by padding with random targets
-    for _ in range(max_targets - len(targets)):
-        dna = random_dna_sequence(k=dna_len)
-        tensors.append([one_hot_kmer(dna), 0])
-
     embedding_tensor = torch.stack(list(map(first, tensors)))
     frequency_tensor = torch.tensor(list(map(second, tensors)))
 
@@ -157,16 +152,22 @@ def create_batches(df, device, batch_size=16):
         samples = df[df['sgrna_id'].isin(set(sgrna_ids))]
         max_targets = samples.groupby('sgrna_id').count().sgrna.max()
 
+        def process_id(df):
+            Y_h, Y_p = tensorfy_targets(df, max_targets)
+            inputs   = torch.stack(Y_h.size(0) * [one_hot_kmer(df.iloc[0]['native_outcome'])])
+            logger.debug(Y_h.shape)
+            return inputs, Y_h, Y_p
+
         batch = samples.groupby('sgrna_id').apply(
-            lambda df: (
-                one_hot_kmer(df.iloc[0]['native_outcome']),
-                tensorfy_targets(df, max_targets)
-            )
+            process_id
         )
 
-        inputs = torch.stack(list(batch.apply(first))).to(device)
-        Y_h = torch.stack(list(batch.apply(lambda x: x[1][0]))).to(device)
-        Y_p = torch.stack(list(batch.apply(lambda x: x[1][1]))).to(device)
+        inputs = torch.cat(list(batch.apply(first))).to(device)
+        Y_h    = torch.cat(list(batch.apply(second))).to(device)
+        Y_p    = torch.cat(list(batch.apply(third))).to(device)
+        logger.debug(inputs.shape)
+        logger.debug(Y_h.shape)
+        logger.debug(Y_p.shape)
 
         return inputs, Y_h, Y_p
 
@@ -208,7 +209,7 @@ class EncoderDecoder(nn.Module):
 
     def decode(self, memory, src_mask, tgt, tgt_mask):
         shp = tgt.shape
-        tgt = self.unsplat(tgt)
+        #tgt = self.unsplat(tgt)
         out = self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
         return out.view(*shp)
 
@@ -292,7 +293,7 @@ class Decoder(nn.Module):
         return Y
 
     def forward(self, x, memory, src_mask, tgt_mask):
-        memory = self.splat(memory, x.size(0) // memory.size(0)) # NEW
+        #memory = self.splat(memory, x.size(0) // memory.size(0)) # NEW
         for layer in self.layers:
             x = layer(x, memory, src_mask, tgt_mask)
         return self.norm(x)
@@ -466,6 +467,16 @@ class ComputeLoss():
             self.opt.zero_grad()
         return loss.item()
 
+def test():
+    crit = nn.KLDivLoss(reduction='batchmean')
+    out = torch.tensor([[[[0.9, 0.1],
+                          [0.5, 0.5]]]])
+    target = torch.tensor([[[[0.9, 0.1],
+                             [0.5, 0.5]]]])
+    print(out.shape)
+    print(target.shape)
+    print(crit(out.log(), target))
+
 def run_epoch(batch_iter, model, loss_compute, device):
     "Standard Training and Logging Function"
     start = time.time()
@@ -541,7 +552,7 @@ def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
     mask = subsequent_mask(X.size(-2)).to(device)
     Y = torch.zeros(X.shape).unsqueeze(0).to(device)
 
-    for i in range(30):
+    for i in range(10):
         res = model.forward(X, Y, mask, mask)
         res = model.generator(res)
         N = DECODE_MAP[res[0, 0, i].argmax(-1).item()]
@@ -560,7 +571,7 @@ def run_model(device, args):
         model_state = torch.load(args.load, map_location=device)
         model.load_state_dict(model_state)
 
-    beam_search(device, model, "GAGAGAGCGACACAGACGACGAGCGACGACG")
+    beam_search(device, model, "GTTGTTGTCATTGACTGGCTACCCGCTTAACGG")
 
 ######################
 ## Argument Parsing ##
@@ -609,6 +620,9 @@ def parse_args():
     return parser.parse_args()
 
 if __name__ == "__main__":
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
+
     warnings.filterwarnings("ignore", category=UserWarning) 
 
     args = parse_args()
