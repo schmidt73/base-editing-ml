@@ -1,5 +1,6 @@
 import argparse
 import sys
+import os
 import time
 import math
 import copy
@@ -467,15 +468,13 @@ class ComputeLoss():
             self.opt.zero_grad()
         return loss.item()
 
-def test():
-    crit = nn.KLDivLoss(reduction='batchmean')
-    out = torch.tensor([[[[0.9, 0.1],
-                          [0.5, 0.5]]]])
-    target = torch.tensor([[[[0.9, 0.1],
-                             [0.5, 0.5]]]])
-    print(out.shape)
-    print(target.shape)
-    print(crit(out.log(), target))
+def save_model(model_state, fpath):
+    try:
+        os.remove(fpath)
+    except FileNotFoundError:
+        logger.info(f"Failed to delete file at path {fpath}")
+
+    save_model(model_state, fpath)
 
 def run_epoch(batch_iter, model, loss_compute, device):
     "Standard Training and Logging Function"
@@ -523,6 +522,7 @@ def train_model(device, args):
         model.load_state_dict(model_state['model'])
         start_epoch = model_state['epoch'] + 1
 
+
     for epoch in range(start_epoch, start_epoch + args.epochs):
         training_iter = create_batches(training_df, device)
 
@@ -538,10 +538,10 @@ def train_model(device, args):
                 'model': model.state_dict()
             }
 
-            torch.save(model_state, args.checkpoint) 
+            save_model(model_state, args.checkpoint) 
 
     if args.save is not None:
-        torch.save(model.state_dict(), args.save) 
+        save_model(model.state_dict(), args.save) 
 
 ######################
 ##    Run Model     ##
@@ -590,7 +590,6 @@ def parse_args():
     parser_train.add_argument(
         '-c', '--checkpoint',
         help='File to store intermediary training state',
-        type=argparse.FileType('wb')
     )
     parser_train.add_argument(
         '-e', '--epochs',
@@ -600,12 +599,10 @@ def parse_args():
     parser_train.add_argument(
         '-s', '--save',
         help='File to store trained model',
-        type=argparse.FileType('wb')
     )
     parser_train.add_argument(
         '-l', '--load-checkpoint',
         help='File containing stored training state',
-        type=argparse.FileType('rb')
     )
     parser_train.set_defaults(func=train_model)
 
@@ -629,4 +626,3 @@ if __name__ == "__main__":
     device = initialize_device()
 
     args.func(device, args)
-

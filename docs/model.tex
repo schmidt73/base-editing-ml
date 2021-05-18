@@ -105,13 +105,29 @@ It would be straightforward to directly predict the desired
 probability distribution. Because the sample space is finite, we could
 do this by predicting a long vector where each entry corresponds to
 the probability of a particular string. However, this vector would be
-intractably large, and almost all entries are 0.
+intractably large, and almost all entries would be 0.
 
 \section*{Proposed Approach}
 
+I have tried several approaches, including one similar to that of
+BE-Hive, however they all failed. Herein, I will describe the most
+recent (and semi-successful) approach that I have taken.
 
-It turns out that this proposed approach is identical to what BE-Hive
-does :( 
+Pick a single input string $x$. Then, we observe a probability
+distribution over strings $P_y$. We can visualize this distribution as
+follows,
+\begin{align*}
+  y_1 &= y_{1,1}\ldots y_{1, k}, f_1\\
+  &\;\;\vdots \notag \\
+  y_n &= y_{n,n}\ldots y_{n, k}, f_n
+\end{align*}
+where $\sum_{i=1}^nf_i = 1$.
+
+We take this set and convert it into $n$ conditional probability
+matrices where the $j$-th row of the $i$-th matrix correspond to the
+conditional probability of an 
+
+
 
 
 
