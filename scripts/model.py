@@ -474,7 +474,7 @@ def save_model(model_state, fpath):
     except FileNotFoundError:
         logger.info(f"Failed to delete file at path {fpath}")
 
-    save_model(model_state, fpath)
+    torch.save(model_state, fpath)
 
 def run_epoch(batch_iter, model, loss_compute, device):
     "Standard Training and Logging Function"
