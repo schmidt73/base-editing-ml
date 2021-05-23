@@ -6,6 +6,7 @@ import math
 import copy
 import random
 import warnings
+import socket
 
 import pandas as pd
 import numpy as np
@@ -15,11 +16,14 @@ import torch.cuda
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.distributed as dist
 
 from collections import defaultdict
 from loguru import logger
 from funcy import partition
 from torch.autograd import Variable
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import ReduceOp
 
 #####################
 ##   DNA Encoding  ##
@@ -148,7 +152,7 @@ def tensorfy_targets(targets, max_targets):
 
     return embedding_tensor, embedding_p
 
-def create_batches(df, device, batch_size=16):
+def create_batches(df, device, rank=0, N=1, batch_size=16):
     def create_batch(sgrna_ids):
         samples = df[df['sgrna_id'].isin(set(sgrna_ids))]
         max_targets = samples.groupby('sgrna_id').count().sgrna.max()
@@ -156,7 +160,6 @@ def create_batches(df, device, batch_size=16):
         def process_id(df):
             Y_h, Y_p = tensorfy_targets(df, max_targets)
             inputs   = torch.stack(Y_h.size(0) * [one_hot_kmer(df.iloc[0]['native_outcome'])])
-            logger.debug(Y_h.shape)
             return inputs, Y_h, Y_p
 
         batch = samples.groupby('sgrna_id').apply(
@@ -166,9 +169,6 @@ def create_batches(df, device, batch_size=16):
         inputs = torch.cat(list(batch.apply(first))).to(device)
         Y_h    = torch.cat(list(batch.apply(second))).to(device)
         Y_p    = torch.cat(list(batch.apply(third))).to(device)
-        logger.debug(inputs.shape)
-        logger.debug(Y_h.shape)
-        logger.debug(Y_p.shape)
 
         return inputs, Y_h, Y_p
 
@@ -177,7 +177,10 @@ def create_batches(df, device, batch_size=16):
     df['frequency'] = df['count'] / df['total']
 
     sgrnas = df['sgrna_id'].sample(df['sgrna_id'].size).unique()
-    for batch in partition(batch_size, sgrnas):
+    sgrnas = list(partition(batch_size, sgrnas))
+    sgrnas = sgrnas[:len(sgrnas) - (len(sgrnas) % N)] # Make batches same size across all nodes
+    for i, batch in enumerate(sgrnas):
+        if i % N != rank: continue
         yield create_batch(batch)
 
 ###########
@@ -432,8 +435,8 @@ def make_model(tgt_vocab=4, N=6,
 HYPER_PARAMETERS = {
     'tgt_vocab': 128,
     'dropout': 0.1,
-    'N': 2,
-    'h': 1,
+    'N': 6,
+    'h': 4,
     'd_ff': 512,
     'd_model': 128,
 }
@@ -461,12 +464,7 @@ class ComputeLoss():
     def __call__(self, out, Y_p):
         out = self.generator(out)
         loss = self.criterion(out, Y_p)
-
-        loss.backward()
-        if self.opt is not None:
-            self.opt.step()
-            self.opt.zero_grad()
-        return loss.item()
+        return loss
 
 def save_model(model_state, fpath):
     try:
@@ -476,18 +474,35 @@ def save_model(model_state, fpath):
 
     torch.save(model_state, fpath)
 
-def run_epoch(batch_iter, model, loss_compute, device):
+def run_epoch(batch_iter, model, loss_compute, device, training=True):
     "Standard Training and Logging Function"
     start = time.time()
     total_tokens = 0
-    total_loss = 0
+    total_loss = None
     tokens = 0
     for i, (X, Y_h, Y_p) in enumerate(batch_iter):
         mask = subsequent_mask(X.size(-2)).to(device)
         ntokens = X.size(0)
-        out = model.forward(X, Y_h, mask, mask)
-        loss = loss_compute(out, Y_p)
-        total_loss += loss
+
+        if training:
+            out = model.forward(X, Y_h, mask, mask)
+            loss = loss_compute(out, Y_p)
+
+            loss.backward()
+            if loss_compute.opt is not None:
+                loss_compute.opt.step()
+                loss_compute.opt.zero_grad()
+        else:
+            with torch.no_grad():
+                out = model.forward(X, Y_h, mask, mask)
+                loss = loss_compute(out, Y_p)
+
+        if total_loss is None:
+            total_loss = loss
+        else:
+            total_loss += loss
+    
+        loss = loss.item()
         total_tokens += ntokens
         tokens += ntokens
         if i % 10 == 1:
@@ -496,16 +511,30 @@ def run_epoch(batch_iter, model, loss_compute, device):
                         f"Tokens per Sec: {tokens / elapsed}")
             start = time.time()
             tokens = 0
+
+    logger.info("Completed epoch.")
     return total_loss / total_tokens
 
-def initialize_device():
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+def initialize_device(rank=0):
+    device = torch.device(f'cuda:0' if torch.cuda.is_available() else 'cpu')
     return device
 
-def train_model(device, args):
+def initialize_process(rank, num_processes, master):
+    host, port = master.split(':')
+    os.environ['MASTER_ADDR'] = host
+    os.environ['MASTER_PORT'] = port
+    dist.init_process_group('nccl', rank=rank, world_size=num_processes)
+    logger.info(f"Initializing process {rank + 1}/{num_processes}")
+
+def train_model(args):
+    initialize_process(args.rank, args.num_processes, args.master)
+    device = initialize_device(args.rank)
+
     logger.info(f'Loaded tensors onto {str(device).upper()}')
 
     training_df = pd.read_csv(args.training_data)
+    if args.test_data is not None:
+        test_df = pd.read_csv(args.test_data)
 
     model = make_model(**HYPER_PARAMETERS)
 
@@ -522,25 +551,50 @@ def train_model(device, args):
         model.load_state_dict(model_state['model'])
         start_epoch = model_state['epoch'] + 1
 
+    model = DDP(model)
+    dist.barrier()
 
+    training_losses, test_losses = [], []
     for epoch in range(start_epoch, start_epoch + args.epochs):
-        training_iter = create_batches(training_df, device)
+        dist.barrier()
+        training_iter = create_batches(training_df, device, batch_size=16, rank=args.rank, N=args.num_processes)
 
-        logger.info(f'=========EPOCH {epoch}=========')
+        if args.rank == 0:
+            logger.info(f'=========EPOCH {epoch}=========')
+
         model.train()
         training_loss = run_epoch(training_iter, model, loss_compute, device)
-        logger.info(f'Training loss: {training_loss}')
+        dist.all_reduce(training_loss, ReduceOp.SUM) 
+        training_loss = training_loss / args.num_processes
+        training_losses.append(training_loss.item())
 
-        if args.checkpoint is not None:
+        if args.rank == 0:
+            logger.info(f'Training loss: {training_loss}')
+
+        if args.test_data is not None:
+            model.eval()
+            test_iter = create_batches(test_df, device, batch_size=16, rank=args.rank, N=args.num_processes)
+            test_loss = run_epoch(test_iter, model, loss_compute, device, training=False)
+            dist.all_reduce(test_loss, ReduceOp.SUM) 
+            test_loss = test_loss / args.num_processes
+            test_losses.append(test_loss.item())
+
+        if args.rank == 0:
+            logger.info(f'Test loss: {test_loss}')
+
+        if args.checkpoint is not None and args.rank == 0:
             model_state = {
                 'epoch': epoch,
-                'training_loss': training_loss,
+                'training_losses': training_losses,
                 'model': model.state_dict()
             }
 
+            if args.test_data is not None:
+                model_state['test_losses'] = test_losses
+
             save_model(model_state, args.checkpoint) 
 
-    if args.save is not None:
+    if args.save is not None and args.rank == 0:
         save_model(model.state_dict(), args.save) 
 
 ######################
@@ -562,7 +616,8 @@ def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
 
     beam_size
 
-def run_model(device, args):
+def run_model(args):
+    device = initialize_device()
     model = make_model(**HYPER_PARAMETERS)
     model.to(device)
     model.eval() 
@@ -588,6 +643,10 @@ def parse_args():
         type=argparse.FileType('rb')
     )
     parser_train.add_argument(
+        '-t', '--test-data',
+        help='CSV file thta contains test data.'
+    )
+    parser_train.add_argument(
         '-c', '--checkpoint',
         help='File to store intermediary training state',
     )
@@ -603,6 +662,23 @@ def parse_args():
     parser_train.add_argument(
         '-l', '--load-checkpoint',
         help='File containing stored training state',
+    )
+    parser_train.add_argument(
+        '-r', '--rank',
+        help='Rank of process.',
+        default=0,
+        type=int,
+    )
+    parser_train.add_argument(
+        '-m', '--master',
+        help='Master hostname.',
+        default=(socket.gethostname() + ':25000')
+    )
+    parser_train.add_argument(
+        '-n', '--num_processes',
+        help='Number of processes',
+        default=1,
+        type=int
     )
     parser_train.set_defaults(func=train_model)
 
@@ -623,6 +699,4 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", category=UserWarning) 
 
     args = parse_args()
-    device = initialize_device()
-
-    args.func(device, args)
+    args.func(args)
