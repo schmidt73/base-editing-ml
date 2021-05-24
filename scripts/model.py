@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from loguru import logger
 from funcy import partition
 from torch.autograd import Variable
@@ -515,7 +515,7 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
     logger.info("Completed epoch.")
     return total_loss / total_tokens
 
-def initialize_device(rank=0):
+def initialize_device():
     device = torch.device(f'cuda:0' if torch.cuda.is_available() else 'cpu')
     return device
 
@@ -528,7 +528,7 @@ def initialize_process(rank, num_processes, master):
 
 def train_model(args):
     initialize_process(args.rank, args.num_processes, args.master)
-    device = initialize_device(args.rank)
+    device = initialize_device()
 
     logger.info(f'Loaded tensors onto {str(device).upper()}')
 
@@ -616,6 +616,15 @@ def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
 
     beam_size
 
+def compute_joint_probability(device, model, sgrna, target):
+    X = one_hot_kmer(sgrna).unsqueeze(0).to(device)
+    mask = subsequent_mask(X.size(-2)).to(device)
+    Y = one_hot_kmer(target).unsqueeze(0).to(device)
+    res = model.forward(X, Y, mask, mask)
+    res = model.generator(res)
+    p = (Y * res.exp()).sum(-1).prod(-1)
+    return p
+   
 def run_model(args):
     device = initialize_device()
     model = make_model(**HYPER_PARAMETERS)
@@ -625,8 +634,29 @@ def run_model(args):
     if args.load is not None:
         model_state = torch.load(args.load, map_location=device)
         model.load_state_dict(model_state)
+    elif args.load_checkpoint is not None:
+        model_state = torch.load(args.load_checkpoint, map_location=device)
+        model_state_dict = OrderedDict()
+        for k, v in model_state['model'].items():
+            name = k[7:]
+            model_state_dict[name] = v
+        model.load_state_dict(model_state_dict)
 
-    beam_search(device, model, "GTTGTTGTCATTGACTGGCTACCCGCTTAACGG")
+    df = pd.read_csv(args.holdout_csv)
+
+    df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
+    df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
+    df['frequency'] = df['count'] / df['total']
+
+    sgrna = df.sgrna_id.drop_duplicates()[0]
+    single_sample = df[df.sgrna_id == sgrna]
+    predictions = single_sample.apply(
+        lambda row: compute_joint_probability(device, model, row['native_outcome'], row['outcome']).item(),
+        axis=1
+    )
+
+    single_sample['predicted_frequency'] = predictions
+    print(single_sample[['frequency', 'predicted_frequency']])
 
 ######################
 ## Argument Parsing ##
@@ -687,6 +717,15 @@ def parse_args():
         '-l', '--load',
         help='File containing model parameters',
         type=argparse.FileType('rb')
+    )
+    parser_run.add_argument(
+        '--load-checkpoint',
+        help='Checkpoint file containing model parameters as well as training information',
+        type=argparse.FileType('rb')
+    )
+    parser_run.add_argument(
+        '--holdout-csv',
+        help='Holdout data to evaluate model against'
     )
     parser_run.set_defaults(func=run_model)
 
