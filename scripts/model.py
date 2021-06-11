@@ -7,6 +7,7 @@ import copy
 import random
 import warnings
 import socket
+import datetime
 
 import pandas as pd
 import numpy as np
@@ -149,6 +150,10 @@ def tensorfy_targets(targets, max_targets):
     frequency_tensor = torch.tensor(list(map(second, tensors)))
 
     embedding_p = tensorfy_conditional(embedding_tensor, frequency_tensor)
+
+    padding = ONE_HOT_MAP_KMER['BBB']
+    padding = torch.tile(padding, (embedding_tensor.shape[0], 1, 1))
+    embedding_tensor = torch.cat([padding, embedding_tensor], dim=1)
 
     return embedding_tensor, embedding_p
 
@@ -322,7 +327,7 @@ class DecoderLayer(nn.Module):
 def subsequent_mask(size):
     "Mask out subsequent positions."
     attn_shape = (1, size, size)
-    subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
+    subsequent_mask = np.triu(np.ones(attn_shape), k=0).astype('uint8') # change k from 1 -> 0
     return torch.from_numpy(subsequent_mask) == 0
 
 def attention(query, key, value, mask=None, dropout=None):
@@ -485,7 +490,7 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
         ntokens = X.size(0)
 
         if training:
-            out = model.forward(X, Y_h, mask, mask)
+            out = model.forward(X, Y_h[:, :-1], mask, mask)
             loss = loss_compute(out, Y_p)
 
             loss.backward()
@@ -494,7 +499,7 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
                 loss_compute.opt.zero_grad()
         else:
             with torch.no_grad():
-                out = model.forward(X, Y_h, mask, mask)
+                out = model.forward(X, Y_h[:, :-1], mask, mask)
                 loss = loss_compute(out, Y_p)
 
         if total_loss is None:
@@ -503,11 +508,11 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
             total_loss += loss
     
         loss = loss.item()
-        total_tokens += ntokens
+        total_tokens += 1
         tokens += ntokens
         if i % 10 == 1:
             elapsed = time.time() - start
-            logger.info(f"Step {i} Loss: {loss / ntokens} "
+            logger.info(f"Step {i} Loss: {loss / 1} "
                         f"Tokens per Sec: {tokens / elapsed}")
             start = time.time()
             tokens = 0
@@ -519,11 +524,12 @@ def initialize_device():
     device = torch.device(f'cuda:0' if torch.cuda.is_available() else 'cpu')
     return device
 
+TIMEOUT = datetime.timedelta(0, 3600 * 8) # 8 hour timeout
 def initialize_process(rank, num_processes, master):
     host, port = master.split(':')
     os.environ['MASTER_ADDR'] = host
     os.environ['MASTER_PORT'] = port
-    dist.init_process_group('nccl', rank=rank, world_size=num_processes)
+    dist.init_process_group('nccl', rank=rank, world_size=num_processes, timeout=TIMEOUT)
     logger.info(f"Initializing process {rank + 1}/{num_processes}")
 
 def train_model(args):
@@ -545,19 +551,20 @@ def train_model(args):
     model.to(device)
     criterion.to(device)
 
+    model = DDP(model)
+
     start_epoch = 0
     if args.load_checkpoint is not None:
         model_state = torch.load(args.load_checkpoint)
         model.load_state_dict(model_state['model'])
         start_epoch = model_state['epoch'] + 1
 
-    model = DDP(model)
     dist.barrier()
 
     training_losses, test_losses = [], []
     for epoch in range(start_epoch, start_epoch + args.epochs):
         dist.barrier()
-        training_iter = create_batches(training_df, device, batch_size=16, rank=args.rank, N=args.num_processes)
+        training_iter = create_batches(training_df, device, batch_size=4, rank=args.rank, N=args.num_processes)
 
         if args.rank == 0:
             logger.info(f'=========EPOCH {epoch}=========')
@@ -573,7 +580,7 @@ def train_model(args):
 
         if args.test_data is not None:
             model.eval()
-            test_iter = create_batches(test_df, device, batch_size=16, rank=args.rank, N=args.num_processes)
+            test_iter = create_batches(test_df, device, batch_size=4, rank=args.rank, N=args.num_processes)
             test_loss = run_epoch(test_iter, model, loss_compute, device, training=False)
             dist.all_reduce(test_loss, ReduceOp.SUM) 
             test_loss = test_loss / args.num_processes
@@ -618,11 +625,14 @@ def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
 
 def compute_joint_probability(device, model, sgrna, target):
     X = one_hot_kmer(sgrna).unsqueeze(0).to(device)
+
     mask = subsequent_mask(X.size(-2)).to(device)
-    Y = one_hot_kmer(target).unsqueeze(0).to(device)
-    res = model.forward(X, Y, mask, mask)
+    Y_out = one_hot_kmer(target)
+    padding = ONE_HOT_MAP_KMER['BBB'].unsqueeze(0)
+    Y_in = torch.cat([padding, Y_out])[:-1].unsqueeze(0).to(device)
+    res = model.forward(X, Y_in, mask, mask)
     res = model.generator(res)
-    p = (Y * res.exp()).sum(-1).prod(-1)
+    p = (Y_out * res.exp()).sum(-1).prod(-1)
     return p
    
 def run_model(args):

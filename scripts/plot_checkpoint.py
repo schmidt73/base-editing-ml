@@ -46,3 +46,5 @@ if __name__ == "__main__":
 
     if args.output is None:
        plt.show() 
+    else:
+       plt.savefig(args.output)
