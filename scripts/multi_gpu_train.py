@@ -12,7 +12,7 @@ bsub_args = [
     '-q', 'gpuqueue',
     '-gpu', '-',
     '-R' , 'rusage[mem=8GB]',
-    '-W', '12:00'
+    '-W', '48:00'
 ]
 
 def get_host(job_id):

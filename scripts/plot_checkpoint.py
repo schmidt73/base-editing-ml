@@ -12,6 +12,10 @@ def parse_args():
         help='Pytorch checkpoint file'
     )
     p.add_argument(
+        '--start-epoch', help='Epoch to start plot at', default=0, type=int
+    )
+
+    p.add_argument(
         '-o', '--output',
         help='Path of output file, otherwise will display result graphically'
     )
@@ -42,7 +46,10 @@ if __name__ == "__main__":
     })
 
     sns.set_theme(context='notebook', style='ticks', palette='rocket_r')
-    g = sns.relplot(data=loss_df, x='Epoch', y='Value', hue='Variable', kind='line')
+    g = sns.relplot(
+        data=loss_df[loss_df.Epoch >= args.start_epoch], 
+        x='Epoch', y='Value', hue='Variable', kind='line'
+    )
 
     if args.output is None:
        plt.show() 

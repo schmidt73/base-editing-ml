@@ -175,7 +175,7 @@ def create_batches(df, device, rank=0, N=1, batch_size=16):
         Y_h    = torch.cat(list(batch.apply(second))).to(device)
         Y_p    = torch.cat(list(batch.apply(third))).to(device)
 
-        return inputs, Y_h, Y_p
+        return sgrna_ids, inputs, Y_h, Y_p
 
     df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
     df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
@@ -327,7 +327,7 @@ class DecoderLayer(nn.Module):
 def subsequent_mask(size):
     "Mask out subsequent positions."
     attn_shape = (1, size, size)
-    subsequent_mask = np.triu(np.ones(attn_shape), k=0).astype('uint8') # change k from 1 -> 0
+    subsequent_mask = np.triu(np.ones(attn_shape), k=1).astype('uint8')
     return torch.from_numpy(subsequent_mask) == 0
 
 def attention(query, key, value, mask=None, dropout=None):
@@ -439,16 +439,17 @@ def make_model(tgt_vocab=4, N=6,
 
 HYPER_PARAMETERS = {
     'tgt_vocab': 128,
-    'dropout': 0.1,
+    'dropout': 0.0,
     'N': 6,
-    'h': 4,
-    'd_ff': 512,
+    'h': 8,
+    'd_ff': 2048,
     'd_model': 128,
 }
 
 TRAINING_PARAMETERS = {
     'lr': 0.001,
-    'momentum': 0.9   
+    'betas': (0.9, 0.98),
+    'eps': 1e-9
 }
 
 class KLCriterion(nn.Module):
@@ -485,7 +486,7 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
     total_tokens = 0
     total_loss = None
     tokens = 0
-    for i, (X, Y_h, Y_p) in enumerate(batch_iter):
+    for i, (sgrna_ids, X, Y_h, Y_p) in enumerate(batch_iter):
         mask = subsequent_mask(X.size(-2)).to(device)
         ntokens = X.size(0)
 
@@ -502,6 +503,13 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
                 out = model.forward(X, Y_h[:, :-1], mask, mask)
                 loss = loss_compute(out, Y_p)
 
+        if torch.isnan(loss).any():
+            print(sgrna_ids)
+            print(X)
+            print(Y_h)
+            print(Y_p)
+            sys.exit(1)
+
         if total_loss is None:
             total_loss = loss
         else:
@@ -510,12 +518,12 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
         loss = loss.item()
         total_tokens += 1
         tokens += ntokens
-        if i % 10 == 1:
-            elapsed = time.time() - start
-            logger.info(f"Step {i} Loss: {loss / 1} "
-                        f"Tokens per Sec: {tokens / elapsed}")
-            start = time.time()
-            tokens = 0
+        #if i % 10 == 1:
+        elapsed = time.time() - start
+        logger.info(f"Step {i} Loss: {loss / 1} "
+                    f"Tokens per Sec: {tokens / elapsed}")
+        start = time.time()
+        tokens = 0
 
     logger.info("Completed epoch.")
     return total_loss / total_tokens
@@ -545,7 +553,7 @@ def train_model(args):
     model = make_model(**HYPER_PARAMETERS)
 
     criterion = KLCriterion()
-    optimizer = optim.SGD(model.parameters(), **TRAINING_PARAMETERS)
+    optimizer = optim.Adam(model.parameters(), **TRAINING_PARAMETERS)
     loss_compute = ComputeLoss(model.generator, criterion, optimizer)
 
     model.to(device)
@@ -554,14 +562,20 @@ def train_model(args):
     model = DDP(model)
 
     start_epoch = 0
+    training_losses, test_losses = [], []
     if args.load_checkpoint is not None:
         model_state = torch.load(args.load_checkpoint)
         model.load_state_dict(model_state['model'])
         start_epoch = model_state['epoch'] + 1
 
+        if 'training_losses' in model_state:
+            training_losses = model_state['training_losses']
+
+        if 'test_losses' in model_state:
+            test_losses = model_state['test_losses']
+
     dist.barrier()
 
-    training_losses, test_losses = [], []
     for epoch in range(start_epoch, start_epoch + args.epochs):
         dist.barrier()
         training_iter = create_batches(training_df, device, batch_size=4, rank=args.rank, N=args.num_processes)
@@ -586,7 +600,7 @@ def train_model(args):
             test_loss = test_loss / args.num_processes
             test_losses.append(test_loss.item())
 
-        if args.rank == 0:
+        if args.rank == 0 and args.test_data is not None:
             logger.info(f'Test loss: {test_loss}')
 
         if args.checkpoint is not None and args.rank == 0:
@@ -627,12 +641,14 @@ def compute_joint_probability(device, model, sgrna, target):
     X = one_hot_kmer(sgrna).unsqueeze(0).to(device)
 
     mask = subsequent_mask(X.size(-2)).to(device)
-    Y_out = one_hot_kmer(target)
-    padding = ONE_HOT_MAP_KMER['BBB'].unsqueeze(0)
+    Y_out = one_hot_kmer(target).to(device)
+    padding = ONE_HOT_MAP_KMER['BBB'].unsqueeze(0).to(device)
     Y_in = torch.cat([padding, Y_out])[:-1].unsqueeze(0).to(device)
+    #print(Y_in[:,0,:])
     res = model.forward(X, Y_in, mask, mask)
     res = model.generator(res)
-    p = (Y_out * res.exp()).sum(-1).prod(-1)
+    #print(f'Log-Softmax Probabilities of first character: {res[:,0,:5]}')
+    p = (Y_out * res).sum(-1).sum(-1).exp()
     return p
    
 def run_model(args):
@@ -658,7 +674,8 @@ def run_model(args):
     df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
     df['frequency'] = df['count'] / df['total']
 
-    sgrna = df.sgrna_id.drop_duplicates()[0]
+    sgrna = df.sgrna_id.drop_duplicates().sample(1).iloc[0]
+    print(sgrna)
     single_sample = df[df.sgrna_id == sgrna]
     predictions = single_sample.apply(
         lambda row: compute_joint_probability(device, model, row['native_outcome'], row['outcome']).item(),
@@ -667,6 +684,7 @@ def run_model(args):
 
     single_sample['predicted_frequency'] = predictions
     print(single_sample[['frequency', 'predicted_frequency']])
+    print(single_sample.sum())
 
 ######################
 ## Argument Parsing ##
@@ -734,7 +752,7 @@ def parse_args():
         type=argparse.FileType('rb')
     )
     parser_run.add_argument(
-        '--holdout-csv',
+        'holdout_csv',
         help='Holdout data to evaluate model against'
     )
     parser_run.set_defaults(func=run_model)
