@@ -91,8 +91,8 @@ def parse_row(bystander_map, replicate_names, row):
 
     bystander_df = bystander_df.append(native_outcome, ignore_index=True).reset_index()
 
-    bystander_df['outcome_sgrna'] = bystander_df['outcome'].str[22:45]
-    bystander_df['outcome'] = bystander_df['outcome'].str[12:45]
+    bystander_df['outcome_sgrna'] = bystander_df['outcome']
+    bystander_df['outcome'] = bystander_df['outcome']
 
     bystander_df['total_edited_r1'] = total_edited_r1
     bystander_df['total_edited_r2'] = total_edited_r2
@@ -106,13 +106,13 @@ def parse_row(bystander_map, replicate_names, row):
     assert bystander_df['total_edited_r1'].iloc[0] <= rep1_edited, f"Failed rep1 total assertion for: {sgrna_id}"
     assert bystander_df['total_edited_r2'].iloc[0] <= rep2_edited, f"Failed rep2 total assertion for: {sgrna_id}"
 
-    bystander_df['native_outcome'] = context[12:45]
+    bystander_df['native_outcome'] = context
     bystander_df['sgrna'] = sgrna
     bystander_df['sgrna_id'] = sgrna_id
 
     return bystander_df[[
-        'sgrna_id', 'sgrna', 'native_outcome', 'outcome_sgrna', 'outcome',
-        'total_r1', 'total_r2', 'count_r1', 'count_r2'
+        'sgrna_id', 'sgrna', 'native_outcome', 'outcome_sgrna', 
+        'outcome', 'total_r1', 'total_r2', 'count_r1', 'count_r2'
     ]]
     
 def main():
