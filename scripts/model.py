@@ -113,30 +113,6 @@ def decode_output(output_tensor):
 ## Data Batching ##
 ###################
 
-def tensorfy_conditional(embedding, frequencies):
-    prefix_map  = {():list(range(0, embedding.size(0)))}
-    embedding_p = torch.zeros(embedding.shape)
-
-    # start with column i
-    for i in range(embedding.size(1)):
-        new_prefix_map = defaultdict(list)
-        # start with all rows
-        for prefix, indices in prefix_map.items():
-            row = torch.zeros(embedding.size(-1))
-            for idx in indices:
-                kmer = embedding[idx, i].argmax().item()
-                row[kmer] += frequencies[idx]
-                new_prefix = prefix + (kmer,)
-                new_prefix_map[new_prefix].append(idx)
-
-            s = row.sum()
-            for idx in indices:
-                embedding_p[idx, i] = row / s
-
-        prefix_map = new_prefix_map
-
-    return embedding_p
-
 def tensorfy_target(row):
     ohe = one_hot_kmer(row['outcome'])
     f = row['frequency']
@@ -146,16 +122,19 @@ def tensorfy_targets(targets, max_targets):
     dna_len = len(targets.iloc[0]['outcome'])
     tensors = list(targets.apply(tensorfy_target, axis=1))
 
-    embedding_tensor = torch.stack(list(map(first, tensors)))
-    frequency_tensor = torch.tensor(list(map(second, tensors)))
-
-    embedding_p = tensorfy_conditional(embedding_tensor, frequency_tensor)
+    embeddings, frequencies = list(map(first, tensors)), list(map(second, tensors))
+    for _ in range(max_targets - len(tensors)):
+        embeddings.append(one_hot_kmer('B' * dna_len))
+        frequencies.append(0)
+    
+    embedding_tensor = torch.stack(embeddings)
+    frequency_tensor = torch.tensor(frequencies)
 
     padding = ONE_HOT_MAP_KMER['BBB']
     padding = torch.tile(padding, (embedding_tensor.shape[0], 1, 1))
     embedding_tensor = torch.cat([padding, embedding_tensor], dim=1)
 
-    return embedding_tensor, embedding_p
+    return embedding_tensor, frequency_tensor
 
 def create_batches(df, device, rank=0, N=1, batch_size=16):
     def create_batch(sgrna_ids):
@@ -163,19 +142,18 @@ def create_batches(df, device, rank=0, N=1, batch_size=16):
         max_targets = samples.groupby('sgrna_id').count().sgrna.max()
 
         def process_id(df):
-            Y_h, Y_p = tensorfy_targets(df, max_targets)
-            inputs   = torch.stack(Y_h.size(0) * [one_hot_kmer(df.iloc[0]['native_outcome'])])
-            return inputs, Y_h, Y_p
+            Y, f = tensorfy_targets(df, max_targets)
+            inputs   = torch.stack(Y.size(0) * [one_hot_kmer(df.iloc[0]['native_outcome'])])
+            return inputs, Y, f
 
-        batch = samples.groupby('sgrna_id').apply(
-            process_id
-        )
+        batch = samples.groupby('sgrna_id').apply(process_id)
 
         inputs = torch.cat(list(batch.apply(first))).to(device)
-        Y_h    = torch.cat(list(batch.apply(second))).to(device)
-        Y_p    = torch.cat(list(batch.apply(third))).to(device)
+        Y    = torch.cat(list(batch.apply(second))).to(device)
+        f    = torch.cat(list(batch.apply(third))).to(device)
 
-        return sgrna_ids, inputs, Y_h, Y_p
+        dims = torch.tensor(list(map(len, batch.apply(third)))).to(device)
+        return sgrna_ids, inputs, Y, f, dims
 
     df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
     df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
@@ -457,8 +435,8 @@ class KLCriterion(nn.Module):
         super(KLCriterion, self).__init__()
         self.crit = nn.KLDivLoss(reduction='batchmean')
 
-    def forward(self, out, Y_p):
-        return self.crit(out, Y_p)
+    def forward(self, f, f_hat):
+        return self.crit(f, f_hat)
 
 class ComputeLoss():
     "A simple loss compute and train function."
@@ -467,9 +445,15 @@ class ComputeLoss():
         self.criterion = criterion
         self.opt = opt
         
-    def __call__(self, out, Y_p):
+    def __call__(self, out, Y, f, dims):
         out = self.generator(out)
-        loss = self.criterion(out, Y_p)
+        f_hat = (Y[:, 1:, :] * out).sum(-1).sum(-1)
+        
+        d = dims[0].item()
+        f = f.reshape((f.size(0) // d, d))
+        f_hat = f_hat.reshape((f_hat.size(0) // d, d))
+
+        loss = self.criterion(f_hat, f)
         return loss
 
 def save_model(model_state, fpath):
@@ -486,13 +470,13 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
     total_tokens = 0
     total_loss = None
     tokens = 0
-    for i, (sgrna_ids, X, Y_h, Y_p) in enumerate(batch_iter):
+    for i, (sgrna_ids, X, Y, f, dims) in enumerate(batch_iter):
         mask = subsequent_mask(X.size(-2)).to(device)
         ntokens = X.size(0)
 
         if training:
-            out = model.forward(X, Y_h[:, :-1], mask, mask)
-            loss = loss_compute(out, Y_p)
+            out = model.forward(X, Y[:, :-1], mask, mask)
+            loss = loss_compute(out, Y, f, dims)
 
             loss.backward()
             if loss_compute.opt is not None:
@@ -500,14 +484,14 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
                 loss_compute.opt.zero_grad()
         else:
             with torch.no_grad():
-                out = model.forward(X, Y_h[:, :-1], mask, mask)
-                loss = loss_compute(out, Y_p)
+                out = model.forward(X, Y[:, :-1], mask, mask)
+                loss = loss_compute(out, Y, f, dims)
 
         if torch.isnan(loss).any():
             print(sgrna_ids)
             print(X)
-            print(Y_h)
-            print(Y_p)
+            print(Y)
+            print(f)
             sys.exit(1)
 
         if total_loss is None:
