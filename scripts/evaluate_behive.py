@@ -104,7 +104,10 @@ def be_hive_predict(test_df, mean=0, sigma=1):
     pred_df['outcome'] = pred_df.apply(convert_prediction, axis=1)
     pred_df = pred_df[['outcome', 'Predicted frequency']]
 
-    frequencies = pred_df.merge(test_df, on='outcome')[['Predicted frequency', 'frequency']]
+    frequencies = pred_df.merge(test_df, on='outcome')[[
+        'sgrna_id', 'sgrna', 'outcome_sgrna', 'native_outcome', 
+        'outcome', 'Predicted frequency', 'frequency'
+    ]]
     frequencies = frequencies.rename(columns={'Predicted frequency': 'predicted frequency'})
 
     efficiency = sigmoid(efficiency['Predicted logit score'] * sigma + mean)
