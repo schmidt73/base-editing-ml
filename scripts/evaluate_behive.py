@@ -82,7 +82,7 @@ def parse_outcome(sgrna, native_outcome):
             outcomes[f'{sgrna[i]}{j}'] = native_outcome[i]
     return outcomes
 
-def be_hive_predict(test_df):
+def be_hive_predict(test_df, mean=0, sigma=1):
     sgrna = test_df.iloc[0]['native_outcome']
 
     with nostdout():
@@ -107,7 +107,7 @@ def be_hive_predict(test_df):
     frequencies = pred_df.merge(test_df, on='outcome')[['Predicted frequency', 'frequency']]
     frequencies = frequencies.rename(columns={'Predicted frequency': 'predicted frequency'})
 
-    efficiency = sigmoid(efficiency['Predicted logit score'])
+    efficiency = sigmoid(efficiency['Predicted logit score'] * sigma + mean)
     frequencies['predicted frequency'] = frequencies['predicted frequency'] * efficiency
     
     true_frequency = test_df[test_df.outcome == sgrna].frequency.iloc[0]
@@ -131,6 +131,13 @@ if __name__ == "__main__":
     validation_df['total']     = validation_df[['total_r1', 'total_r2']].sum(axis=1)
     validation_df['frequency'] = validation_df['count'] / validation_df['total']
 
+    counts = validation_df[validation_df.native_outcome == validation_df.outcome]\
+        [['count_r1', 'count_r2']].sum(axis=1)
+    total = validation_df[validation_df.native_outcome == validation_df.outcome]\
+        [['total_r1', 'total_r2']].sum(axis=1)
+
+    freq = (counts / total).agg(['mean', 'std'])
+
     with nostdout():
         be_efficiency_model.init_model(base_editor=args.base_editor, celltype=args.cell_type)
         be_bystander_model.init_model(base_editor=args.base_editor, celltype=args.cell_type)
@@ -142,7 +149,10 @@ if __name__ == "__main__":
 
     sgrnas = set(validation_df.sgrna_id.sample(num_samples).unique())
 
+
     pred_df = validation_df[validation_df.sgrna_id.isin(sgrnas)]
-    pred_df = pred_df.groupby('sgrna_id').apply(be_hive_predict)
+    pred_df = pred_df.groupby('sgrna_id').apply(
+        lambda df: be_hive_predict(df, mean=freq['mean'], sigma=freq['std'])
+    )
     pred_df.to_csv(args.output)
 
