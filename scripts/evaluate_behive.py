@@ -54,6 +54,11 @@ def parse_arguments():
         default=sys.stdout
     )
 
+    parser.add_argument(
+        '--num-samples', type=int,
+        help='Number of holdout sgRNAs to sample for evaluation'
+    )
+
     return parser.parse_args()
 
 '''
@@ -104,6 +109,12 @@ def be_hive_predict(test_df):
 
     efficiency = sigmoid(efficiency['Predicted logit score'])
     frequencies['predicted frequency'] = frequencies['predicted frequency'] * efficiency
+    
+    true_frequency = test_df[test_df.outcome == sgrna].frequency.iloc[0]
+    frequencies = frequencies.append(
+        {'predicted frequency': 1 - efficiency, 'frequency': true_frequency}, 
+        ignore_index=True
+    )
 
     return frequencies
 
@@ -124,7 +135,13 @@ if __name__ == "__main__":
         be_efficiency_model.init_model(base_editor=args.base_editor, celltype=args.cell_type)
         be_bystander_model.init_model(base_editor=args.base_editor, celltype=args.cell_type)
 
-    sgrnas = set(validation_df.sgrna_id.sample(5).unique())
+    if args.num_samples is None:
+        num_samples = len(validation_df.sgrna_id.drop_duplicates())
+    else:
+        num_samples = args.num_samples
+
+    sgrnas = set(validation_df.sgrna_id.sample(num_samples).unique())
+
     pred_df = validation_df[validation_df.sgrna_id.isin(sgrnas)]
     pred_df = pred_df.groupby('sgrna_id').apply(be_hive_predict)
     pred_df.to_csv(args.output)

@@ -113,6 +113,16 @@ def decode_output(output_tensor):
 ## Data Batching ##
 ###################
 
+def process_df(df):
+    df = df.copy()
+    df['outcome_sgrna']  = df['outcome'].str[22:45]
+    df['outcome']        = df['outcome'].str[12:45]
+    df['native_outcome'] = df['native_outcome'].str[12:45]
+    df['count']          = df[['count_r1', 'count_r2']].sum(axis=1)
+    df['total']          = df[['total_r1', 'total_r2']].sum(axis=1)
+    df['frequency']      = df['count'] / df['total']
+    return df
+
 def tensorfy_target(row):
     ohe = one_hot_kmer(row['outcome'])
     f = row['frequency']
@@ -155,10 +165,7 @@ def create_batches(df, device, rank=0, N=1, batch_size=16):
         dims = torch.tensor(list(map(len, batch.apply(third)))).to(device)
         return sgrna_ids, inputs, Y, f, dims
 
-    df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
-    df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
-    df['frequency'] = df['count'] / df['total']
-
+    df = process_df(df)
     sgrnas = df['sgrna_id'].sample(df['sgrna_id'].size).unique()
     sgrnas = list(partition(batch_size, sgrnas))
     sgrnas = sgrnas[:len(sgrnas) - (len(sgrnas) % N)] # Make batches same size across all nodes
@@ -606,34 +613,20 @@ def train_model(args):
 ##    Run Model     ##
 ######################
 
-def beam_search(device, model : EncoderDecoder, seq, beam_size=1):
-    X = one_hot_kmer(seq).unsqueeze(0).to(device)
-    mask = subsequent_mask(X.size(-2)).to(device)
-    Y = torch.zeros(X.shape).unsqueeze(0).to(device)
-
-    for i in range(10):
-        res = model.forward(X, Y, mask, mask)
-        res = model.generator(res)
-        N = DECODE_MAP[res[0, 0, i].argmax(-1).item()]
-        print(N)
-        Y_i = ONE_HOT_MAP_KMER[N]
-        Y[0, 0, i] = Y_i
-
-    beam_size
-
-def compute_joint_probability(device, model, sgrna, target):
-    X = one_hot_kmer(sgrna).unsqueeze(0).to(device)
+def compute_joint_probability(device, model, df):
+    Y, f    = tensorfy_targets(df, len(df))
+    X       = torch.stack(Y.size(0) * [one_hot_kmer(df.iloc[0]['native_outcome'])])
+    Y, X, f = Y.to(device), X.to(device), f.to(device)
 
     mask = subsequent_mask(X.size(-2)).to(device)
-    Y_out = one_hot_kmer(target).to(device)
-    padding = ONE_HOT_MAP_KMER['BBB'].unsqueeze(0).to(device)
-    Y_in = torch.cat([padding, Y_out])[:-1].unsqueeze(0).to(device)
-    #print(Y_in[:,0,:])
-    res = model.forward(X, Y_in, mask, mask)
-    res = model.generator(res)
-    #print(f'Log-Softmax Probabilities of first character: {res[:,0,:5]}')
-    p = (Y_out * res).sum(-1).sum(-1).exp()
-    return p
+    with torch.no_grad():
+        out = model.forward(X, Y[:, :-1], mask, mask)
+        out = model.generator(out)
+
+    log_f_hat = (Y[:, 1:, :] * out).sum(-1).sum(-1)
+    f_hat = log_f_hat.exp().cpu().numpy()
+    pred = np.array([f.cpu().numpy(), f_hat])
+    return pd.DataFrame(pred.T, columns=['frequency', 'predicted frequency'])
    
 def run_model(args):
     device = initialize_device()
@@ -653,22 +646,20 @@ def run_model(args):
         model.load_state_dict(model_state_dict)
 
     df = pd.read_csv(args.holdout_csv)
+    df = process_df(df)
 
-    df['count']     = df[['count_r1', 'count_r2']].sum(axis=1)
-    df['total']     = df[['total_r1', 'total_r2']].sum(axis=1)
-    df['frequency'] = df['count'] / df['total']
+    if args.num_samples is None:
+        num_samples = len(df.sgrna_id.drop_duplicates())
+    else:
+        num_samples = args.num_samples
 
-    sgrna = df.sgrna_id.drop_duplicates().sample(1).iloc[0]
-    print(sgrna)
-    single_sample = df[df.sgrna_id == sgrna]
-    predictions = single_sample.apply(
-        lambda row: compute_joint_probability(device, model, row['native_outcome'], row['outcome']).item(),
-        axis=1
+    sgrnas = set(df.sgrna_id.drop_duplicates().sample(num_samples))
+    sample_df = df[df.sgrna_id.isin(sgrnas)]
+    predictions = sample_df.groupby('sgrna_id').apply(
+        lambda df: compute_joint_probability(device, model, df),
     )
 
-    single_sample['predicted_frequency'] = predictions
-    print(single_sample[['frequency', 'predicted_frequency']])
-    print(single_sample.sum())
+    predictions.to_csv(sys.stdout)
 
 ######################
 ## Argument Parsing ##
@@ -738,6 +729,10 @@ def parse_args():
     parser_run.add_argument(
         'holdout_csv',
         help='Holdout data to evaluate model against'
+    )
+    parser_run.add_argument(
+        '--num-samples', type=int,
+        help='Number of holdout sgRNAs to sample for evaluation'
     )
     parser_run.set_defaults(func=run_model)
 
