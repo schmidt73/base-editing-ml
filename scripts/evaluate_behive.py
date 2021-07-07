@@ -8,6 +8,7 @@ import re
 import warnings
 
 sys.path.append('/lila/data/leslie/schmidth/projects/be_hive')
+
 from be_predict_efficiency import predict as be_efficiency_model
 from be_predict_bystander import predict as be_bystander_model
 
@@ -104,8 +105,19 @@ def be_hive_predict(test_df, mean=0, sigma=1):
     pred_df['outcome'] = pred_df.apply(convert_prediction, axis=1)
     pred_df = pred_df[['outcome', 'Predicted frequency']]
 
+    def hd(s1, s2):
+        return sum([1 for i in range(len(s1)) if s1[i] != s2[i]])
+
+    # pred_df['outcome']
+    # distances = pred_df['outcome'].apply(lambda o: hd(test_df['outcome'].iloc[0], o))
+    # print(pred_df.iloc[distances.argmin()].outcome)
+    # print(test_df.outcome.iloc[0])
+    # print(pred_df[['outcome']].assign(distances=distances))
+
     frequencies = pred_df.merge(test_df, on='outcome')[['Predicted frequency', 'frequency']]
     frequencies = frequencies.rename(columns={'Predicted frequency': 'predicted frequency'})
+    print(frequencies)
+
 
     efficiency = sigmoid(efficiency['Predicted logit score'] * sigma + mean)
     frequencies['predicted frequency'] = frequencies['predicted frequency'] * efficiency
@@ -137,6 +149,8 @@ if __name__ == "__main__":
         [['total_r1', 'total_r2']].sum(axis=1)
 
     freq = (counts / total).agg(['mean', 'std'])
+    if np.isnan(freq['std']):
+        freq['std'] = 1
 
     with nostdout():
         be_efficiency_model.init_model(base_editor=args.base_editor, celltype=args.cell_type)
@@ -149,10 +163,8 @@ if __name__ == "__main__":
 
     sgrnas = set(validation_df.sgrna_id.sample(num_samples).unique())
 
-
     pred_df = validation_df[validation_df.sgrna_id.isin(sgrnas)]
     pred_df = pred_df.groupby('sgrna_id').apply(
         lambda df: be_hive_predict(df, mean=freq['mean'], sigma=freq['std'])
     )
     pred_df.to_csv(args.output)
-
