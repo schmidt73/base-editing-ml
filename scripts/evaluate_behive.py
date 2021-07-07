@@ -105,16 +105,11 @@ def be_hive_predict(test_df, mean=0, sigma=1):
     pred_df['outcome'] = pred_df.apply(convert_prediction, axis=1)
     pred_df = pred_df[['outcome', 'Predicted frequency']]
 
-    def hd(s1, s2):
-        return sum([1 for i in range(len(s1)) if s1[i] != s2[i]])
+    frequencies = pred_df.merge(test_df, on='outcome')[[
+        'sgrna_id', 'sgrna', 'outcome_sgrna', 'native_outcome', 
+        'outcome', 'Predicted frequency', 'frequency'
+    ]]
 
-    # pred_df['outcome']
-    # distances = pred_df['outcome'].apply(lambda o: hd(test_df['outcome'].iloc[0], o))
-    # print(pred_df.iloc[distances.argmin()].outcome)
-    # print(test_df.outcome.iloc[0])
-    # print(pred_df[['outcome']].assign(distances=distances))
-
-    frequencies = pred_df.merge(test_df, on='outcome')[['Predicted frequency', 'frequency']]
     frequencies = frequencies.rename(columns={'Predicted frequency': 'predicted frequency'})
     print(frequencies)
 

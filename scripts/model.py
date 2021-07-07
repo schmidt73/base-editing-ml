@@ -626,7 +626,11 @@ def compute_joint_probability(device, model, df):
     log_f_hat = (Y[:, 1:, :] * out).sum(-1).sum(-1)
     f_hat = log_f_hat.exp().cpu().numpy()
     pred = np.array([f.cpu().numpy(), f_hat])
-    return pd.DataFrame(pred.T, columns=['frequency', 'predicted frequency'])
+
+    frequency_df = pd.DataFrame(pred.T, columns=['frequency', 'predicted frequency'])
+    frequency_df[['sgrna', 'outcome_sgrna', 'native_outcome', 'outcome']] = \
+        df[['sgrna', 'outcome_sgrna', 'native_outcome', 'outcome']].reset_index(drop=True)
+    return frequency_df
    
 def run_model(args):
     device = initialize_device()
