@@ -614,6 +614,9 @@ def train_model(args):
 ######################
 
 def compute_joint_probability(device, model, df):
+    long_df = df
+    df      = process_df(df)
+
     Y, f    = tensorfy_targets(df, len(df))
     X       = torch.stack(Y.size(0) * [one_hot_kmer(df.iloc[0]['native_outcome'])])
     Y, X, f = Y.to(device), X.to(device), f.to(device)
@@ -629,7 +632,7 @@ def compute_joint_probability(device, model, df):
 
     frequency_df = pd.DataFrame(pred.T, columns=['frequency', 'predicted frequency'])
     frequency_df[['sgrna', 'outcome_sgrna', 'native_outcome', 'outcome']] = \
-        df[['sgrna', 'outcome_sgrna', 'native_outcome', 'outcome']].reset_index(drop=True)
+        long_df[['sgrna', 'outcome_sgrna', 'native_outcome', 'outcome']].reset_index(drop=True)
     return frequency_df
    
 def run_model(args):
@@ -650,7 +653,6 @@ def run_model(args):
         model.load_state_dict(model_state_dict)
 
     df = pd.read_csv(args.holdout_csv)
-    df = process_df(df)
 
     if args.num_samples is None:
         num_samples = len(df.sgrna_id.drop_duplicates())
