@@ -7,7 +7,8 @@ import sys
 import re
 import warnings
 
-sys.path.append('/lila/data/leslie/schmidth/projects/be_hive')
+sys.path.append('/home/schmidt73/Dropbox/base-editing/be_hive')
+#sys.path.append('/lila/data/leslie/schmidth/projects/be_hive')
 
 from be_predict_efficiency import predict as be_efficiency_model
 from be_predict_bystander import predict as be_bystander_model
@@ -111,12 +112,10 @@ def be_hive_predict(test_df, mean=0, sigma=1):
     ]]
 
     frequencies = frequencies.rename(columns={'Predicted frequency': 'predicted frequency'})
-    print(frequencies)
-
 
     efficiency = sigmoid(efficiency['Predicted logit score'] * sigma + mean)
     frequencies['predicted frequency'] = frequencies['predicted frequency'] * efficiency
-    
+
     true_frequency = test_df[test_df.outcome == sgrna].iloc[0]
     true_frequency['predicted frequency'] = 1 - efficiency
     frequencies = frequencies.append(
@@ -139,9 +138,9 @@ if __name__ == "__main__":
     validation_df['total']     = validation_df[['total_r1', 'total_r2']].sum(axis=1)
     validation_df['frequency'] = validation_df['count'] / validation_df['total']
 
-    counts = validation_df[validation_df.native_outcome == validation_df.outcome]\
+    counts = validation_df[validation_df.native_outcome != validation_df.outcome]\
         [['count_r1', 'count_r2']].sum(axis=1)
-    total = validation_df[validation_df.native_outcome == validation_df.outcome]\
+    total = validation_df[validation_df.native_outcome != validation_df.outcome]\
         [['total_r1', 'total_r2']].sum(axis=1)
 
     freq = (counts / total).agg(['mean', 'std'])
