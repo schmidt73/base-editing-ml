@@ -156,7 +156,7 @@ if __name__ == "__main__":
     else:
         num_samples = args.num_samples
 
-    sgrnas = set(validation_df.sgrna_id.sample(num_samples).unique())
+    sgrnas = set(pd.Series(validation_df.sgrna_id.unique()).sample(num_samples))
 
     pred_df = validation_df[validation_df.sgrna_id.isin(sgrnas)]
     pred_df = pred_df.groupby('sgrna_id').apply(
