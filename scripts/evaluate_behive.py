@@ -7,8 +7,8 @@ import sys
 import re
 import warnings
 
-sys.path.append('/home/schmidt73/Dropbox/base-editing/be_hive')
-#sys.path.append('/lila/data/leslie/schmidth/projects/be_hive')
+#sys.path.append('/home/schmidt73/Dropbox/base-editing/be_hive')
+sys.path.append('/lila/data/leslie/schmidth/projects/be_hive')
 
 from be_predict_efficiency import predict as be_efficiency_model
 from be_predict_bystander import predict as be_bystander_model

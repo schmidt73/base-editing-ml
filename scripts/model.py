@@ -652,7 +652,11 @@ def run_model(args):
 
     if args.load is not None:
         model_state = torch.load(args.load, map_location=device)
-        model.load_state_dict(model_state)
+        model_state_dict = OrderedDict()
+        for k, v in model_state.items():
+            name = k[7:]
+            model_state_dict[name] = v
+        model.load_state_dict(model_state_dict)
     elif args.load_checkpoint is not None:
         model_state = torch.load(args.load_checkpoint, map_location=device)
         model_state_dict = OrderedDict()

@@ -38,6 +38,7 @@ def get_job_arguments(args, rank, master=None):
         '-e', args.epochs,
         '-r', rank,
         '-n', args.num_processes,
+        '--keep-best',
     ]
 
     if args.test_data is not None:
