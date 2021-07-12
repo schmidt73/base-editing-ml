@@ -77,9 +77,6 @@ def parse_row(bystander_map, replicate_names, row):
 
     bystander_df['outcome'] = bystander_df.apply(convert_bystander_to_outcome, axis=1)
 
-    # Filter out rare outcomes 
-    bystander_df = bystander_df[bystander_df.count_r1 + bystander_df.count_r2 >= 100]
-
     total_edited_r1 = np.sum(bystander_df['count_r1'])
     total_edited_r2 = np.sum(bystander_df['count_r2'])
 
