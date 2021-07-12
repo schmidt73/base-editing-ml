@@ -482,7 +482,7 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
         ntokens = X.size(0)
 
         if training:
-            out = model.forward(X, Y[:, :-1], mask, mask)
+            out = model.forward(X, Y[:, :-1], None, mask)
             loss = loss_compute(out, Y, f, dims)
 
             loss.backward()
@@ -491,7 +491,7 @@ def run_epoch(batch_iter, model, loss_compute, device, training=True):
                 loss_compute.opt.zero_grad()
         else:
             with torch.no_grad():
-                out = model.forward(X, Y[:, :-1], mask, mask)
+                out = model.forward(X, Y[:, :-1], None, mask)
                 loss = loss_compute(out, Y, f, dims)
 
         if torch.isnan(loss).any():
@@ -567,6 +567,7 @@ def train_model(args):
 
     dist.barrier()
 
+    best_model, min_test_loss = None, np.inf
     for epoch in range(start_epoch, start_epoch + args.epochs):
         dist.barrier()
         training_iter = create_batches(training_df, device, batch_size=4, rank=args.rank, N=args.num_processes)
@@ -606,8 +607,16 @@ def train_model(args):
 
             save_model(model_state, args.checkpoint) 
 
+        if args.keep_best and args.test_data is not None:
+            if min_test_loss > test_loss:
+                min_test_loss = test_loss
+                best_model = model.state_dict()
+
     if args.save is not None and args.rank == 0:
-        save_model(model.state_dict(), args.save) 
+        if best_model is not None:
+            save_model(best_model, args.save) 
+        else:
+            save_model(model.state_dict(), args.save) 
 
 ######################
 ##    Run Model     ##
@@ -623,7 +632,7 @@ def compute_joint_probability(device, model, df):
 
     mask = subsequent_mask(X.size(-2)).to(device)
     with torch.no_grad():
-        out = model.forward(X, Y[:, :-1], mask, mask)
+        out = model.forward(X, Y[:, :-1], None, mask)
         out = model.generator(out)
 
     log_f_hat = (Y[:, 1:, :] * out).sum(-1).sum(-1)
@@ -692,7 +701,13 @@ def parse_args():
     parser_train.add_argument(
         '-e', '--epochs',
         help='Number of epochs to run',
-        type=int, default=100, 
+        type=int,
+        default=100,
+    )
+    parser_train.add_argument(
+        '--keep-best',
+        action='store_true',
+        help='Keep model that performs best on test data'
     )
     parser_train.add_argument(
         '-s', '--save',
