@@ -19,7 +19,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 from loguru import logger
 from funcy import partition
 from torch.autograd import Variable
@@ -599,8 +599,11 @@ def train_model(args):
             model_state = {
                 'epoch': epoch,
                 'training_losses': training_losses,
-                'model': model.state_dict()
+                'model': model.state_dict(),
             }
+
+            if min_test_loss is not None:
+                model_state['min_test_loss'] = min_test_loss
 
             if args.test_data is not None:
                 model_state['test_losses'] = test_losses
